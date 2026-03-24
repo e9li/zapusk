@@ -2,6 +2,7 @@ mod app;
 mod caddy;
 mod config;
 mod doctor;
+mod init;
 mod manager;
 mod project;
 mod ui;
@@ -41,10 +42,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Doctor) => doctor::run().await,
-        Some(Commands::Init) => {
-            eprintln!("zapusk init is not yet implemented");
-            Ok(())
-        }
+        Some(Commands::Init) => init::run().await,
         Some(Commands::Add) => {
             eprintln!("zapusk add is not yet implemented");
             Ok(())
