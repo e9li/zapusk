@@ -96,7 +96,7 @@ async fn step_dnsmasq_config() -> Result<()> {
         };
 
         if prompt_yn(&format!("      Add address=/.test/127.0.0.1 to {}?", config_path)) {
-            let content = format!("\n# Added by zapusk\naddress=/.test/127.0.0.1\n");
+            let content = "\n# Added by zapusk\naddress=/.test/127.0.0.1\n";
             match std::fs::OpenOptions::new()
                 .append(true)
                 .open(config_path)

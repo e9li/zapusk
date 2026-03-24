@@ -139,15 +139,12 @@ impl Manager {
         let mut events = vec![];
         let mut exited = vec![];
         for (name, child) in &mut self.children {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    exited.push(name.clone());
-                    events.push(ManagerEvent::ProcessExited {
-                        project_name: name.clone(),
-                        success: status.success(),
-                    });
-                }
-                _ => {}
+            if let Ok(Some(status)) = child.try_wait() {
+                exited.push(name.clone());
+                events.push(ManagerEvent::ProcessExited {
+                    project_name: name.clone(),
+                    success: status.success(),
+                });
             }
         }
         for name in exited {
