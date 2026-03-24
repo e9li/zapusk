@@ -16,6 +16,19 @@ pub enum ActivePane {
     Logs,
 }
 
+/// What happens when the user confirms
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    StopProject(String),
+}
+
+/// A pending confirmation dialog
+#[derive(Debug, Clone)]
+pub struct ConfirmDialog {
+    pub message: String,
+    pub action: ConfirmAction,
+}
+
 /// Top-level application state
 pub struct App {
     pub projects: Vec<Project>,
@@ -33,6 +46,8 @@ pub struct App {
     pub search_query: String,
     /// Show project detail popup
     pub show_detail_popup: bool,
+    /// Pending confirmation dialog
+    pub confirm_dialog: Option<ConfirmDialog>,
     manager: Manager,
     event_rx: mpsc::Receiver<ManagerEvent>,
 }
@@ -59,6 +74,7 @@ impl App {
             search_mode: false,
             search_query: String::new(),
             show_detail_popup: false,
+            confirm_dialog: None,
             manager: Manager::new(tx),
             event_rx: rx,
         }
@@ -114,6 +130,19 @@ impl App {
             return Ok(());
         }
 
+        // Confirmation dialog
+        if let Some(dialog) = self.confirm_dialog.take() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.execute_confirm(dialog.action).await;
+                }
+                _ => {
+                    self.status_message = Some("Cancelled".into());
+                }
+            }
+            return Ok(());
+        }
+
         // Detail popup
         if self.show_detail_popup {
             match key.code {
@@ -138,13 +167,13 @@ impl App {
 
             // Project actions
             KeyCode::Char('s') => self.start_selected().await,
-            KeyCode::Char('x') => self.stop_selected().await,
+            KeyCode::Char('x') => self.confirm_stop_selected(),
             KeyCode::Char('r') => self.restart_selected().await,
 
             // Caddy
             KeyCode::Char('R') => self.reload_caddy().await,
 
-            // Log scrolling (when log pane focused)
+            // Log scrolling
             KeyCode::PageUp => self.scroll_logs_up(10),
             KeyCode::PageDown => self.scroll_logs_down(10),
             KeyCode::End | KeyCode::Char('G') => {
@@ -164,6 +193,9 @@ impl App {
 
             // Open in browser
             KeyCode::Char('o') => self.open_in_browser(),
+
+            // Copy domain to clipboard
+            KeyCode::Char('c') => self.copy_domain(),
 
             _ => {}
         }
@@ -259,30 +291,31 @@ impl App {
         }
     }
 
-    async fn stop_selected(&mut self) {
-        if let Some(project) = self.projects.get(self.selected) {
-            let name = project.config.name.clone();
-            match self.manager.stop(&name).await {
-                Ok(()) => {
-                    if let Some(p) = self.find_project_mut(&name) {
-                        p.status = ProjectStatus::Stopped;
-                        p.pid = None;
-                        p.started_at = None;
-                    }
-                    self.status_message = Some(format!("Stopped {}", name));
+    async fn stop_project(&mut self, name: &str) {
+        let name = name.to_string();
+        match self.manager.stop(&name).await {
+            Ok(()) => {
+                if let Some(p) = self.find_project_mut(&name) {
+                    p.status = ProjectStatus::Stopped;
+                    p.pid = None;
+                    p.started_at = None;
                 }
-                Err(e) => {
-                    self.status_message = Some(format!("Error: {}", e));
-                }
+                self.status_message = Some(format!("Stopped {}", name));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Error: {}", e));
             }
         }
     }
 
     async fn restart_selected(&mut self) {
-        self.stop_selected().await;
-        // Small delay so the port is released before restarting
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        self.start_selected().await;
+        if let Some(project) = self.projects.get(self.selected) {
+            let name = project.config.name.clone();
+            self.stop_project(&name).await;
+            // Small delay so the port is released before restarting
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            self.start_selected().await;
+        }
     }
 
     async fn reload_caddy(&mut self) {
@@ -294,6 +327,86 @@ impl App {
             }
         } else {
             self.status_message = Some("No [caddy] section in config".into());
+        }
+    }
+
+    /// Start all projects with autostart = true
+    pub async fn autostart(&mut self) {
+        let autostart_names: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|p| p.config.autostart)
+            .map(|p| p.config.name.clone())
+            .collect();
+
+        for name in autostart_names {
+            if let Some(idx) = self.projects.iter().position(|p| p.config.name == name) {
+                let config = self.projects[idx].config.clone();
+                match self.manager.start(&config).await {
+                    Ok(status) => {
+                        self.projects[idx].status = status;
+                        self.status_message = Some(format!("Autostarting {}…", name));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Autostart error: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    fn confirm_stop_selected(&mut self) {
+        if let Some(project) = self.selected_project() {
+            if project.is_running() {
+                self.confirm_dialog = Some(ConfirmDialog {
+                    message: format!("Stop {}? (y/n)", project.config.name),
+                    action: ConfirmAction::StopProject(project.config.name.clone()),
+                });
+            } else {
+                self.status_message = Some(format!("{} is not running", project.config.name));
+            }
+        }
+    }
+
+    async fn execute_confirm(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::StopProject(name) => {
+                self.stop_project(&name).await;
+            }
+        }
+    }
+
+    fn copy_domain(&mut self) {
+        if let Some(project) = self.selected_project() {
+            let domain = project.config.domain.clone();
+            #[cfg(target_os = "macos")]
+            {
+                if let Ok(mut child) = std::process::Command::new("pbcopy")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        use std::io::Write;
+                        let _ = write!(stdin, "{}", domain);
+                    }
+                    let _ = child.wait();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if let Ok(mut child) = std::process::Command::new("xclip")
+                    .args(["-selection", "clipboard"])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        use std::io::Write;
+                        let _ = write!(stdin, "{}", domain);
+                    }
+                    let _ = child.wait();
+                }
+            }
+            self.status_message = Some(format!("Copied {}", domain));
         }
     }
 
