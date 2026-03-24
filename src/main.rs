@@ -1,11 +1,13 @@
 mod app;
 mod caddy;
 mod config;
+mod doctor;
 mod manager;
 mod project;
 mod ui;
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -16,8 +18,42 @@ use std::io;
 use app::App;
 use config::Config;
 
+#[derive(Parser)]
+#[command(name = "zapusk", about = "Local dev project manager")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Check system dependencies
+    Doctor,
+    /// First-run setup wizard
+    Init,
+    /// Add a project interactively
+    Add,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Doctor) => doctor::run().await,
+        Some(Commands::Init) => {
+            eprintln!("zapusk init is not yet implemented");
+            Ok(())
+        }
+        Some(Commands::Add) => {
+            eprintln!("zapusk add is not yet implemented");
+            Ok(())
+        }
+        None => run_tui().await,
+    }
+}
+
+async fn run_tui() -> Result<()> {
     let config = Config::load()?;
     let mut app = App::new(config);
 
