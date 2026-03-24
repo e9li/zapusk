@@ -35,6 +35,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_detail_popup(frame, project);
         }
     }
+
+    // Overlay: confirmation dialog
+    if let Some(dialog) = &app.confirm_dialog {
+        draw_confirm_dialog(frame, &dialog.message);
+    }
 }
 
 fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
@@ -240,6 +245,30 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
                 .title(" Project Details ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(popup, area);
+}
+
+fn draw_confirm_dialog(frame: &mut Frame, message: &str) {
+    let area = centered_rect(40, 20, frame.area());
+    frame.render_widget(Clear, area);
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", message),
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(" Confirm ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
         )
         .wrap(Wrap { trim: false });
 

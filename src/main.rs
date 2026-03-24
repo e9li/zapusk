@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
 async fn run_tui() -> Result<()> {
     let config = Config::load()?;
     let mut app = App::new(config);
+    app.autostart().await;
 
     // Setup terminal
     enable_raw_mode()?;
