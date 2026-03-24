@@ -1,0 +1,35 @@
+# zapusk config
+# Place at ~/.config/zapusk/config.toml
+
+[[projects]]
+name = "myshop"
+domain = "myshop.test"
+port = 4000
+type = "phoenix"
+path = "/home/user/projects/myshop"
+
+[[projects]]
+name = "company-site"
+domain = "company.test"
+port = 8001
+type = "kirby"
+php_version = "8.1"
+path = "/home/user/projects/company-site"
+
+[[projects]]
+name = "blog"
+domain = "blog.test"
+port = 8002
+type = "symfony"
+path = "/home/user/projects/blog"
+
+[[projects]]
+name = "api"
+domain = "api.test"
+port = 3000
+type = "axum"
+path = "/home/user/projects/api"
+
+[caddy]
+config_path = "/home/user/.config/zapusk/Caddyfile"
+# caddy_bin = "caddy"  # optional, defaults to "caddy" in PATH
