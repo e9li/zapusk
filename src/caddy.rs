@@ -4,41 +4,57 @@ use tokio::process::Command;
 
 use crate::config::{CaddyConfig, ProjectConfig, ProjectType};
 
+const DEFAULT_FPM_SOCKET_TEMPLATE: &str = "/opt/homebrew/var/run/php/php{version}-fpm.sock";
+
 /// Generate a Caddyfile from all project configs
-pub fn generate_caddyfile(projects: &[ProjectConfig]) -> String {
+pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig) -> String {
     let mut out = String::new();
 
+    let fpm_template = caddy_config
+        .fpm_socket_template
+        .as_deref()
+        .unwrap_or(DEFAULT_FPM_SOCKET_TEMPLATE);
+
     for project in projects {
+        let domain = if project.tls {
+            format!("https://{}", project.domain)
+        } else {
+            project.domain.clone()
+        };
+
+        let tls_line = if project.tls {
+            "\n    tls internal"
+        } else {
+            ""
+        };
+
         match project.project_type {
             ProjectType::Kirby => {
-                // Kirby: Caddy handles PHP directly via FPM
                 let php_version = project.php_version.as_deref().unwrap_or("8.3");
-                let fpm_sock = format!(
-                    "/opt/homebrew/var/run/php/php{}-fpm.sock",
-                    php_version
-                );
+                let fpm_sock = fpm_template.replace("{version}", php_version);
                 out.push_str(&format!(
-                    r#"{domain} {{
+                    r#"{domain} {{{tls_line}
     root * {path}/public
     php_fastcgi unix/{sock}
     file_server
 }}
 
 "#,
-                    domain = project.domain,
+                    domain = domain,
+                    tls_line = tls_line,
                     path = project.path,
                     sock = fpm_sock,
                 ));
             }
             _ => {
-                // Everything else: reverse proxy to local port
                 out.push_str(&format!(
-                    r#"{domain} {{
+                    r#"{domain} {{{tls_line}
     reverse_proxy localhost:{port}
 }}
 
 "#,
-                    domain = project.domain,
+                    domain = domain,
+                    tls_line = tls_line,
                     port = project.port,
                 ));
             }
@@ -53,7 +69,7 @@ pub async fn write_and_reload(
     projects: &[ProjectConfig],
     caddy_config: &CaddyConfig,
 ) -> Result<()> {
-    let content = generate_caddyfile(projects);
+    let content = generate_caddyfile(projects, caddy_config);
     let path = Path::new(&caddy_config.config_path);
 
     // Ensure parent directory exists

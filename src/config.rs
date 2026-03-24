@@ -28,6 +28,9 @@ pub struct ProjectConfig {
     /// Start this project automatically when zapusk launches
     #[serde(default)]
     pub autostart: bool,
+    /// Enable TLS via Caddy (uses `tls internal` for local certs)
+    #[serde(default)]
+    pub tls: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -100,6 +103,9 @@ impl ProjectType {
 pub struct CaddyConfig {
     pub config_path: String,
     pub caddy_bin: Option<String>,
+    /// Template for PHP-FPM socket path, with {version} placeholder.
+    /// Defaults to "/opt/homebrew/var/run/php/php{version}-fpm.sock" on macOS.
+    pub fpm_socket_template: Option<String>,
 }
 
 impl Config {

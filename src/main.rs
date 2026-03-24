@@ -1,3 +1,4 @@
+mod add;
 mod app;
 mod caddy;
 mod config;
@@ -43,10 +44,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Doctor) => doctor::run().await,
         Some(Commands::Init) => init::run().await,
-        Some(Commands::Add) => {
-            eprintln!("zapusk add is not yet implemented");
-            Ok(())
-        }
+        Some(Commands::Add) => add::run().await,
         None => run_tui().await,
     }
 }
