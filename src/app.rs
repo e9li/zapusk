@@ -53,6 +53,11 @@ impl App {
 
     /// Main event loop tick — call this repeatedly from main
     pub async fn tick(&mut self) -> Result<()> {
+        // Poll child processes for exit (non-blocking)
+        for event in self.manager.poll_exits() {
+            self.handle_manager_event(event);
+        }
+
         // Drain manager events (non-blocking)
         while let Ok(event) = self.event_rx.try_recv() {
             self.handle_manager_event(event);

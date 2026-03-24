@@ -51,7 +51,12 @@ impl ProjectType {
             ),
             ProjectType::Symfony => (
                 "symfony".into(),
-                vec!["server:start".into(), "--no-tls".into()],
+                vec![
+                    "server:start".into(),
+                    "--no-tls".into(),
+                    "--port".into(),
+                    config.port.to_string(),
+                ],
             ),
             ProjectType::Kirby => {
                 let php_bin = php_binary(config.php_version.as_deref());
