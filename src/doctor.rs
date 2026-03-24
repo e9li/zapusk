@@ -127,7 +127,7 @@ pub async fn check_caddy() -> CheckResult {
     match Command::new("caddy").arg("version").output().await {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
-            let version = version.trim().split_whitespace().next().unwrap_or("unknown");
+            let version = version.split_whitespace().next().unwrap_or("unknown");
             CheckResult::pass(format!("caddy {}", version))
         }
         _ => CheckResult::fail(
