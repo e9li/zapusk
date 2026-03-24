@@ -50,6 +50,8 @@ pub struct Project {
     pub logs: VecDeque<LogEntry>,
     /// Process ID if running
     pub pid: Option<u32>,
+    /// When the process was started (for uptime display)
+    pub started_at: Option<DateTime<Local>>,
 }
 
 impl Project {
@@ -59,6 +61,7 @@ impl Project {
             status: ProjectStatus::Stopped,
             logs: VecDeque::with_capacity(LOG_BUFFER_SIZE),
             pid: None,
+            started_at: None,
         }
     }
 
