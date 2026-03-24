@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -19,6 +20,14 @@ pub struct ProjectConfig {
     pub path: String,
     /// Only relevant for Kirby projects
     pub php_version: Option<String>,
+    /// Custom command override (bypasses built-in start_command)
+    pub command: Option<String>,
+    /// Extra environment variables forwarded to the child process
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Start this project automatically when zapusk launches
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -49,15 +58,24 @@ impl ProjectType {
                 "mix".into(),
                 vec!["phx.server".into()],
             ),
-            ProjectType::Symfony => (
-                "symfony".into(),
-                vec![
+            ProjectType::Symfony => {
+                let mut args = vec![
                     "server:start".into(),
                     "--no-tls".into(),
                     "--port".into(),
                     config.port.to_string(),
-                ],
-            ),
+                ];
+                // Read .php-version from project dir if present
+                let php_version_path = std::path::Path::new(&config.path).join(".php-version");
+                if let Ok(version) = std::fs::read_to_string(&php_version_path) {
+                    let version = version.trim().to_string();
+                    if !version.is_empty() {
+                        args.push("--php-version".into());
+                        args.push(version);
+                    }
+                }
+                ("symfony".into(), args)
+            }
             ProjectType::Kirby => {
                 let php_bin = php_binary(config.php_version.as_deref());
                 (
