@@ -57,6 +57,7 @@ impl Manager {
         let mut child = Command::new(&bin)
             .args(&args)
             .current_dir(&config.path)
+            .env("PORT", config.port.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
@@ -105,19 +106,32 @@ impl Manager {
             });
         }
 
-        // Spawn a task to watch for exit
-        let tx_exit = tx.clone();
-        let name_exit = name.clone();
-        // We can't move child here since we store it — instead watch via pid
-        // TODO: improve exit detection (currently relies on stdout/stderr closing)
-        // A better approach: use child.wait() in a dedicated task before storing
-        // For now, store child and poll status on tick
-        drop(tx_exit); // placeholder
-        drop(name_exit);
-
         self.children.insert(config.name.clone(), child);
 
         Ok(ProjectStatus::Starting)
+    }
+
+    /// Poll all children for exit status (non-blocking).
+    /// Call this from App::tick() to detect processes that exited on their own.
+    pub fn poll_exits(&mut self) -> Vec<ManagerEvent> {
+        let mut events = vec![];
+        let mut exited = vec![];
+        for (name, child) in &mut self.children {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    exited.push(name.clone());
+                    events.push(ManagerEvent::ProcessExited {
+                        project_name: name.clone(),
+                        success: status.success(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        for name in exited {
+            self.children.remove(&name);
+        }
+        events
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<()> {
