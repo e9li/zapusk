@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
+use std::net::TcpListener;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -52,12 +53,33 @@ impl Manager {
             bail!("Project {} is already running", config.name);
         }
 
-        let (bin, args) = config.project_type.start_command(config);
+        // Check if port is already in use
+        if TcpListener::bind(("127.0.0.1", config.port)).is_err() {
+            bail!("Port {} is already in use", config.port);
+        }
 
-        let mut child = Command::new(&bin)
-            .args(&args)
+        let (bin, args) = if let Some(ref cmd_override) = config.command {
+            let parts: Vec<&str> = cmd_override.split_whitespace().collect();
+            if parts.is_empty() {
+                bail!("Empty command override for {}", config.name);
+            }
+            let bin = parts[0].to_string();
+            let args = parts[1..].iter().map(|s| s.to_string()).collect();
+            (bin, args)
+        } else {
+            config.project_type.start_command(config)
+        };
+
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args)
             .current_dir(&config.path)
-            .env("PORT", config.port.to_string())
+            .env("PORT", config.port.to_string());
+
+        for (key, val) in &config.env {
+            cmd.env(key, val);
+        }
+
+        let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
