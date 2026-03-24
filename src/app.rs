@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -24,6 +25,14 @@ pub struct App {
     /// Status bar message (shown at bottom)
     pub status_message: Option<String>,
     pub should_quit: bool,
+    /// Log scroll offset: 0 = pinned to bottom (auto-scroll)
+    pub log_scroll_offset: usize,
+    /// Search mode active
+    pub search_mode: bool,
+    /// Current search query
+    pub search_query: String,
+    /// Show project detail popup
+    pub show_detail_popup: bool,
     manager: Manager,
     event_rx: mpsc::Receiver<ManagerEvent>,
 }
@@ -46,6 +55,10 @@ impl App {
             config,
             status_message: None,
             should_quit: false,
+            log_scroll_offset: 0,
+            search_mode: false,
+            search_query: String::new(),
+            show_detail_popup: false,
             manager: Manager::new(tx),
             event_rx: rx,
         }
@@ -74,12 +87,47 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Always handle Ctrl+C
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit().await;
+            return Ok(());
+        }
+
+        // Search mode input
+        if self.search_mode {
+            match key.code {
+                KeyCode::Esc => {
+                    self.search_mode = false;
+                    self.search_query.clear();
+                }
+                KeyCode::Enter => {
+                    self.search_mode = false;
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Detail popup
+        if self.show_detail_popup {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('d') => {
+                    self.show_detail_popup = false;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match key.code {
             // Quit
             KeyCode::Char('q') => self.quit().await,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.quit().await
-            }
 
             // Navigation
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
@@ -95,6 +143,27 @@ impl App {
 
             // Caddy
             KeyCode::Char('R') => self.reload_caddy().await,
+
+            // Log scrolling (when log pane focused)
+            KeyCode::PageUp => self.scroll_logs_up(10),
+            KeyCode::PageDown => self.scroll_logs_down(10),
+            KeyCode::End | KeyCode::Char('G') => {
+                self.log_scroll_offset = 0;
+            }
+
+            // Search
+            KeyCode::Char('/') => {
+                self.search_mode = true;
+                self.search_query.clear();
+            }
+
+            // Detail popup
+            KeyCode::Char('d') => {
+                self.show_detail_popup = true;
+            }
+
+            // Open in browser
+            KeyCode::Char('o') => self.open_in_browser(),
 
             _ => {}
         }
@@ -112,6 +181,7 @@ impl App {
                 if let Some(p) = self.find_project_mut(&project_name) {
                     p.status = ProjectStatus::Running;
                     p.pid = Some(pid);
+                    p.started_at = Some(Local::now());
                 }
                 self.status_message = Some(format!("{} started", project_name));
             }
@@ -123,6 +193,7 @@ impl App {
                         ProjectStatus::Failed("exited with error".into())
                     };
                     p.pid = None;
+                    p.started_at = None;
                 }
             }
         }
@@ -139,12 +210,18 @@ impl App {
     fn select_next(&mut self) {
         if !self.projects.is_empty() {
             self.selected = (self.selected + 1) % self.projects.len();
+            self.log_scroll_offset = 0;
         }
     }
 
     fn select_prev(&mut self) {
         if !self.projects.is_empty() {
-            self.selected = self.selected.saturating_sub(1);
+            if self.selected == 0 {
+                self.selected = self.projects.len() - 1;
+            } else {
+                self.selected -= 1;
+            }
+            self.log_scroll_offset = 0;
         }
     }
 
@@ -153,6 +230,15 @@ impl App {
             ActivePane::ProjectList => ActivePane::Logs,
             ActivePane::Logs => ActivePane::ProjectList,
         };
+    }
+
+    fn scroll_logs_up(&mut self, amount: usize) {
+        let max = self.selected_logs().len();
+        self.log_scroll_offset = (self.log_scroll_offset + amount).min(max);
+    }
+
+    fn scroll_logs_down(&mut self, amount: usize) {
+        self.log_scroll_offset = self.log_scroll_offset.saturating_sub(amount);
     }
 
     async fn start_selected(&mut self) {
@@ -181,6 +267,7 @@ impl App {
                     if let Some(p) = self.find_project_mut(&name) {
                         p.status = ProjectStatus::Stopped;
                         p.pid = None;
+                        p.started_at = None;
                     }
                     self.status_message = Some(format!("Stopped {}", name));
                 }
@@ -210,16 +297,36 @@ impl App {
         }
     }
 
+    fn open_in_browser(&self) {
+        if let Some(project) = self.selected_project() {
+            let url = format!("http://{}", project.config.domain);
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(&url).spawn();
+            #[cfg(not(target_os = "macos"))]
+            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        }
+    }
+
     async fn quit(&mut self) {
         self.status_message = Some("Stopping all projects…".into());
         self.manager.stop_all().await;
         self.should_quit = true;
     }
 
-    /// Logs for the currently selected project
+    /// Logs for the currently selected project, optionally filtered by search query
     pub fn selected_logs(&self) -> Vec<&crate::project::LogEntry> {
-        self.selected_project()
+        let logs: Vec<_> = self
+            .selected_project()
             .map(|p| p.logs.iter().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        if self.search_query.is_empty() {
+            logs
+        } else {
+            let query = self.search_query.to_lowercase();
+            logs.into_iter()
+                .filter(|entry| entry.line.to_lowercase().contains(&query))
+                .collect()
+        }
     }
 }
