@@ -70,12 +70,14 @@ src/
 │   ├── project.rs    # Project model (config + runtime state + log ring buffer)
 │   ├── manager.rs    # Child process spawning, stdout/stderr streaming via tokio
 │   ├── caddy.rs      # Caddyfile generation and `caddy reload`
-│   └── config.rs     # TOML config deserialization + ProjectType
+│   ├── config.rs     # TOML config deserialization + ProjectType
+│   └── discovery.rs  # Listening-port discovery + stack heuristics
 └── cli/
     ├── doctor.rs     # `zapusk doctor` — dependency checks
     ├── init.rs       # `zapusk init` — interactive first-run setup
     ├── add.rs        # `zapusk add` — add project interactively
-    └── destroy.rs    # `zapusk destroy` — remove all zapusk configuration
+    ├── destroy.rs    # `zapusk destroy` — remove all zapusk configuration
+    └── discover.rs   # `zapusk discover` — list unmanaged listening apps
 ```
 
 ---
@@ -90,6 +92,42 @@ zapusk init         # interactive first-run setup
 zapusk doctor       # check all dependencies
 zapusk add          # add a project to config interactively
 zapusk destroy      # remove all zapusk configuration
+zapusk discover     # discover listening services (managed + unmanaged)
+zapusk discover --import 4000  # import discovered service by port/pid
+```
+
+---
+
+## Build and install locally (release)
+
+Recommended local release workflow:
+
+```bash
+# from repository root
+cargo build --release
+mkdir -p "$HOME/.local/bin"
+cp target/release/zapusk "$HOME/.local/bin/zapusk"
+chmod +x "$HOME/.local/bin/zapusk"
+```
+
+Add to `~/.zshrc` (once):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Reload shell and verify:
+
+```bash
+source ~/.zshrc
+which zapusk
+zapusk --version
+```
+
+Alternative (Cargo-managed install path):
+
+```bash
+cargo install --path . --force
 ```
 
 ---
@@ -195,16 +233,64 @@ Setup complete. Run `zapusk` to open the TUI.
 | `s` | Start selected project |
 | `x` | Stop selected project (with confirmation) |
 | `r` | Restart selected project |
+| `e` | Edit selected project |
+| `D` or `Del` | Remove selected project from config |
 | `R` | Regenerate Caddyfile + reload Caddy |
 | `o` | Open project domain in browser |
 | `c` | Copy domain to clipboard |
 | `d` | Show project detail popup |
+| `u` | Show unmanaged services popup |
 | `/` | Search / filter logs |
 | `tab` | Switch focus between project list and logs |
 | `j/k` or `↑/↓` | Navigate project list |
 | `PgUp/PgDn` | Scroll logs |
 | `G` or `End` | Jump to latest logs |
-| `q` | Quit (stops all running projects) |
+| `q` | Quit (keeps running projects alive) |
+| `Q` | Force quit (stops projects, then tries to stop Caddy/dnsmasq) |
+
+Inside the unmanaged services popup (`u`): `j/k` select, `Enter` inspect,
+`i` import as project, `I` ignore, `f` toggle stack filter (`dev-only`/`all`),
+`w` toggle port filter (`web`/`all-ports`), `r` refresh, `Esc` close.
+
+Left pane sections: Projects (top), Unmanaged summary (middle), Services health
+(bottom: Caddy/dnsmasq as running/paused/stopped).
+
+Project list badges: `[M]` = managed by zapusk, `[A]` = adopted external process.
+
+Project list also shows `tls:on` / `tls:off` per project.
+
+### Add/Edit form fields
+
+Both Add (`a`) and Edit (`e`) include these fields:
+
+- `Name`
+- `Domain`
+- `Port`
+- `Upstream` (maps to `upstream_host`)
+- `Type`
+- `TLS` (`off`/`on`)
+- `Directory`
+
+Field behavior:
+
+- text fields: type normally
+- selector fields (`Type`, `TLS`): use `←/→` or `Tab`/`Shift+Tab`
+- `Enter`: move to next field / submit at the end
+- `Esc`: cancel
+
+### Startup diagnostics in logs
+
+When starting a project, zapusk writes explicit steps to project logs:
+
+1. ensure Caddy config
+2. request process start
+3. verify domain reachability using `curl`
+
+If a project is marked started but domain is not reachable, you will see a
+`domain check failed: ...` log line with the curl error.
+
+If the configured port is already in use, zapusk adopts the existing process and
+shows a conflict warning in status (`adopted existing process`).
 
 ---
 
@@ -247,10 +333,26 @@ type = "axum"
 path = "/home/user/projects/api"
 command = "cargo"         # optional: command override
 args = ["run", "--bin", "api"]
+upstream_host = "127.0.0.1" # optional: override reverse proxy target host
+
+# if unset, zapusk uses loopback fallback for proxying:
+#   127.0.0.1:<port> first, then [::1]:<port>
+
+# `zapusk doctor` warns on duplicate ports and errors on duplicate upstream targets
+# (same upstream_host + port across multiple projects).
 
 [caddy]
 config_path = "/home/user/.config/zapusk/Caddyfile"
 # caddy_bin = "caddy"      # optional, defaults to "caddy" from PATH
+
+[discovery]
+# Optional: what `w` (web-only) means in unmanaged popup.
+# Supports single ports and ranges.
+web_ports = ["80", "443", "8080", "8443", "3000-9999"]
+
+[[ignored_services]]
+port = 3306
+command = "mariadbd"
 ```
 
 ---
