@@ -11,12 +11,12 @@ pub async fn run() -> Result<()> {
     let slug = crate::core::slugify(&name);
     let default_domain = format!("{}.{}", slug, tld);
     let domain = prompt_with_default("Domain", &default_domain)?;
-    let port: u16 = prompt("Port")?
-        .parse()
-        .context("Port must be a number")?;
-    let project_type: ProjectType = prompt_with_default("Type (phoenix/symfony/kirby/axum)", "phoenix")?
-        .parse()
-        .context("Invalid project type")?;
+    let port: u16 = prompt("Port")?.parse().context("Port must be a number")?;
+    let project_type: ProjectType =
+        prompt_with_default("Type (phoenix/symfony/kirby/axum)", "phoenix")?
+            .parse()
+            .context("Invalid project type")?;
+    let tls = prompt_bool_with_default("Enable TLS (https)", false)?;
     let path = prompt("Project directory (e.g. /home/user/projects/myapp)")?;
     if !std::path::Path::new(&path).is_dir() {
         anyhow::bail!("Directory not found: {}", path);
@@ -48,7 +48,9 @@ domain = "{domain}"
 port = {port}
 type = "{project_type}"
 path = "{path}"{php_version_line}
+{tls_line}
 "#,
+        tls_line = if tls { "tls = true" } else { "" }
     );
 
     let config_file = config_path();
@@ -57,11 +59,19 @@ path = "{path}"{php_version_line}
         if let Some(parent) = config_file.parent() {
             std::fs::create_dir_all(parent)?;
         } else {
-            anyhow::bail!("Could not determine parent dir for {}", config_file.display());
+            anyhow::bail!(
+                "Could not determine parent dir for {}",
+                config_file.display()
+            );
         }
         let caddyfile_path = config_file
             .parent()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine parent dir for {}", config_file.display()))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not determine parent dir for {}",
+                    config_file.display()
+                )
+            })?
             .join("Caddyfile");
         let initial = format!(
             "# zapusk config\n\ntld = \"{tld}\"\n\n[caddy]\nconfig_path = \"{}\"\n",
@@ -106,5 +116,22 @@ fn prompt_with_default(label: &str, default: &str) -> Result<String> {
         Ok(default.to_string())
     } else {
         Ok(input)
+    }
+}
+
+fn prompt_bool_with_default(label: &str, default: bool) -> Result<bool> {
+    let default_label = if default { "Y/n" } else { "y/N" };
+    print!("{} [{}]: ", label, default_label);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+    if input.is_empty() {
+        return Ok(default);
+    }
+    match input.as_str() {
+        "y" | "yes" | "true" | "1" => Ok(true),
+        "n" | "no" | "false" | "0" => Ok(false),
+        _ => anyhow::bail!("Please enter y/n"),
     }
 }

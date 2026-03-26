@@ -48,7 +48,26 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
                 directives.push("file_server".to_string());
             }
             _ => {
-                directives.push(format!("reverse_proxy localhost:{}", project.port));
+                if let Some(host) = project
+                    .upstream_host
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                {
+                    directives.push(format!(
+                        "reverse_proxy {}",
+                        format_host_port(host, project.port)
+                    ));
+                } else {
+                    // Prefer IPv4 loopback first (Symfony often binds only to 127.0.0.1),
+                    // but keep IPv6 loopback as fallback for apps bound on ::1.
+                    directives.push(format!(
+                        "reverse_proxy 127.0.0.1:{} [::1]:{} {{",
+                        project.port, project.port
+                    ));
+                    directives.push("lb_policy first".to_string());
+                    directives.push("}".to_string());
+                }
             }
         }
 
@@ -62,8 +81,17 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
     out
 }
 
+fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
 /// Write the Caddyfile and reload Caddy.
-/// Skips the reload if the Caddyfile content hasn't changed and Caddy is already running.
+/// Even if content is unchanged, we still issue a reload when Caddy is running
+/// to ensure the active process applies this exact config path.
 pub async fn write_and_reload(
     projects: &[ProjectConfig],
     caddy_config: &CaddyConfig,
@@ -80,11 +108,6 @@ pub async fn write_and_reload(
     // Check if content actually changed
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let caddy_up = is_running().await;
-
-    if existing == content && caddy_up {
-        // Nothing changed and Caddy is running — skip
-        return Ok(());
-    }
 
     if existing != content {
         std::fs::write(path, &content)

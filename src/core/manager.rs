@@ -18,14 +18,12 @@ pub enum ManagerEvent {
         is_stderr: bool,
     },
     /// Process exited
-    ProcessExited {
-        project_name: String,
-        success: bool,
-    },
-    /// Process confirmed running (heuristic: first stdout line received)
+    ProcessExited { project_name: String, success: bool },
+    /// Process confirmed running
     ProcessStarted {
         project_name: String,
         pid: u32,
+        adopted: bool,
     },
 }
 
@@ -61,15 +59,25 @@ impl Manager {
             if let Some(pid) = find_port_pid(config.port).await {
                 // Adopt: track this external process
                 self.adopted.insert(config.name.clone(), pid);
-                let _ = self.event_tx.send(ManagerEvent::ProcessStarted {
-                    project_name: config.name.clone(),
-                    pid,
-                }).await;
-                let _ = self.event_tx.send(ManagerEvent::LogLine {
-                    project_name: config.name.clone(),
-                    line: format!("Adopted existing process (pid {}) on port {}", pid, config.port),
-                    is_stderr: false,
-                }).await;
+                let _ = self
+                    .event_tx
+                    .send(ManagerEvent::ProcessStarted {
+                        project_name: config.name.clone(),
+                        pid,
+                        adopted: true,
+                    })
+                    .await;
+                let _ = self
+                    .event_tx
+                    .send(ManagerEvent::LogLine {
+                        project_name: config.name.clone(),
+                        line: format!(
+                            "Adopted existing process (pid {}) on port {}",
+                            pid, config.port
+                        ),
+                        is_stderr: false,
+                    })
+                    .await;
                 return Ok(ProjectStatus::Running);
             }
             bail!(
@@ -82,8 +90,9 @@ impl Manager {
             if !config.args.is_empty() {
                 (cmd_override.clone(), config.args.clone())
             } else {
-                let parts = shell_words::split(cmd_override)
-                    .map_err(|e| anyhow::anyhow!("Invalid command override for {}: {}", config.name, e))?;
+                let parts = shell_words::split(cmd_override).map_err(|e| {
+                    anyhow::anyhow!("Invalid command override for {}: {}", config.name, e)
+                })?;
                 if parts.is_empty() {
                     bail!("Empty command override for {}", config.name);
                 }
@@ -99,7 +108,7 @@ impl Manager {
         };
 
         if bin.trim().is_empty() {
-                bail!("Empty command override for {}", config.name);
+            bail!("Empty command override for {}", config.name);
         }
 
         let mut cmd = Command::new(&bin);
@@ -128,6 +137,7 @@ impl Manager {
             .send(ManagerEvent::ProcessStarted {
                 project_name: name.clone(),
                 pid,
+                adopted: false,
             })
             .await;
 
@@ -138,11 +148,13 @@ impl Manager {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = tx_out.send(ManagerEvent::LogLine {
-                        project_name: name_out.clone(),
-                        line,
-                        is_stderr: false,
-                    }).await;
+                    let _ = tx_out
+                        .send(ManagerEvent::LogLine {
+                            project_name: name_out.clone(),
+                            line,
+                            is_stderr: false,
+                        })
+                        .await;
                 }
             });
         }
@@ -154,11 +166,13 @@ impl Manager {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = tx_err.send(ManagerEvent::LogLine {
-                        project_name: name_err.clone(),
-                        line,
-                        is_stderr: true,
-                    }).await;
+                    let _ = tx_err
+                        .send(ManagerEvent::LogLine {
+                            project_name: name_err.clone(),
+                            line,
+                            is_stderr: true,
+                        })
+                        .await;
                 }
             });
         }
@@ -236,10 +250,14 @@ impl Manager {
 
         if let Some(pid) = find_port_pid(config.port).await {
             self.adopted.insert(config.name.clone(), pid);
-            let _ = self.event_tx.send(ManagerEvent::ProcessStarted {
-                project_name: config.name.clone(),
-                pid,
-            }).await;
+            let _ = self
+                .event_tx
+                .send(ManagerEvent::ProcessStarted {
+                    project_name: config.name.clone(),
+                    pid,
+                    adopted: true,
+                })
+                .await;
             Some(pid)
         } else {
             None
@@ -252,8 +270,10 @@ impl Manager {
     }
 
     pub async fn stop_all(&mut self) {
-        // Only stop processes that were explicitly spawned by zapusk.
         for (_, pid) in self.spawned.drain() {
+            let _ = send_sigterm(pid);
+        }
+        for (_, pid) in self.adopted.drain() {
             let _ = send_sigterm(pid);
         }
     }

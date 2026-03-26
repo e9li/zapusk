@@ -89,7 +89,10 @@ async fn step_remove_dnsmasq_entry(tld: &str) -> usize {
     let content = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(_) => {
-            println!("\n[2/4] dnsmasq config — could not read {}, skipping", config_path);
+            println!(
+                "\n[2/4] dnsmasq config — could not read {}, skipping",
+                config_path
+            );
             return 0;
         }
     };
@@ -144,7 +147,10 @@ async fn step_remove_resolver(tld: &str) -> usize {
     let path = Path::new(&resolver_file);
 
     if !path.exists() {
-        println!("\n[3/4] macOS resolver — {} not found, skipping", resolver_file);
+        println!(
+            "\n[3/4] macOS resolver — {} not found, skipping",
+            resolver_file
+        );
         return 0;
     }
 
@@ -164,7 +170,10 @@ async fn step_remove_resolver(tld: &str) -> usize {
             1
         }
         _ => {
-            println!("      \u{2717} Failed — remove it manually: sudo rm {}", resolver_file);
+            println!(
+                "      \u{2717} Failed — remove it manually: sudo rm {}",
+                resolver_file
+            );
             0
         }
     }

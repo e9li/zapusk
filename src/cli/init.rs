@@ -33,9 +33,12 @@ pub async fn run() -> Result<()> {
     let all_ok = doctor::run_quiet().await.unwrap_or(false);
     if all_ok {
         sp.done("All checks passed").await;
-        println!("\nSetup complete. Run `zapusk add` to add a project, then `zapusk` to open the TUI.");
+        println!(
+            "\nSetup complete. Run `zapusk add` to add a project, then `zapusk` to open the TUI."
+        );
     } else {
-        sp.fail("Some checks failed — run `zapusk doctor` for details").await;
+        sp.fail("Some checks failed — run `zapusk doctor` for details")
+            .await;
         println!("\nSetup finished with issues. Run `zapusk doctor` to see what needs fixing.");
     }
 
@@ -111,10 +114,7 @@ async fn step_dnsmasq_config(tld: &str) -> Result<()> {
 
         if prompt_yn(&format!("      Add {} to {}?", entry, config_path)) {
             let content = format!("\n# Added by zapusk\n{}\n", entry);
-            match std::fs::OpenOptions::new()
-                .append(true)
-                .open(config_path)
-            {
+            match std::fs::OpenOptions::new().append(true).open(config_path) {
                 Ok(mut f) => {
                     use std::io::Write as _;
                     f.write_all(content.as_bytes())?;
@@ -130,23 +130,84 @@ async fn step_dnsmasq_config(tld: &str) -> Result<()> {
     // macOS resolver
     if cfg!(target_os = "macos") {
         let resolver_file = format!("/etc/resolver/{}", tld);
-        let resolver_path = Path::new(&resolver_file);
-        if resolver_path.exists() {
-            println!("      \u{2713} {} exists", resolver_file);
-        } else if prompt_yn(&format!("      Create {}? (requires sudo)", resolver_file)) {
-            let cmd = format!(
-                "mkdir -p /etc/resolver && echo 'nameserver 127.0.0.1' > {}",
-                resolver_file
-            );
-            let status = Command::new("sudo")
-                .args(["bash", "-c", &cmd])
-                .status()
-                .await?;
-            if status.success() {
-                println!("      \u{2713} {} created", resolver_file);
-            } else {
-                println!("      \u{2717} Failed — create it manually");
+        ensure_macos_resolver(&resolver_file).await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_macos_resolver(resolver_file: &str) -> Result<()> {
+    let resolver_path = Path::new(resolver_file);
+    let expected = "nameserver 127.0.0.1";
+
+    if resolver_path.exists() {
+        match std::fs::read_to_string(resolver_path) {
+            Ok(content) if content.lines().any(|line| line.trim() == expected) => {
+                println!("      \u{2713} {} already configured", resolver_file);
+                return Ok(());
             }
+            Ok(_) => {
+                println!(
+                    "      ! {} exists but is missing `{}`",
+                    resolver_file, expected
+                );
+                if prompt_yn("      Append nameserver entry to existing file? (requires sudo)") {
+                    let cmd = format!(
+                        "grep -q '^nameserver 127.0.0.1$' {file} || printf '\n# Added by zapusk\nnameserver 127.0.0.1\n' >> {file}",
+                        file = resolver_file
+                    );
+                    let status = Command::new("sudo")
+                        .args(["bash", "-c", &cmd])
+                        .status()
+                        .await?;
+                    if status.success() {
+                        println!("      \u{2713} Updated existing resolver file");
+                    } else {
+                        println!("      \u{2717} Failed to update resolver file");
+                    }
+                }
+                return Ok(());
+            }
+            Err(_) => {
+                println!(
+                    "      ! {} exists but could not be read without elevated permissions",
+                    resolver_file
+                );
+                if prompt_yn(
+                    "      Ensure nameserver entry with sudo? (will keep existing content)",
+                ) {
+                    let cmd = format!(
+                        "grep -q '^nameserver 127.0.0.1$' {file} || printf '\n# Added by zapusk\nnameserver 127.0.0.1\n' >> {file}",
+                        file = resolver_file
+                    );
+                    let status = Command::new("sudo")
+                        .args(["bash", "-c", &cmd])
+                        .status()
+                        .await?;
+                    if status.success() {
+                        println!("      \u{2713} Resolver file ensured");
+                    } else {
+                        println!("      \u{2717} Failed to ensure resolver file");
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    if prompt_yn(&format!("      Create {}? (requires sudo)", resolver_file)) {
+        let cmd = format!(
+            "mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\\n' > {}",
+            resolver_file
+        );
+        let status = Command::new("sudo")
+            .args(["bash", "-c", &cmd])
+            .status()
+            .await?;
+        if status.success() {
+            println!("      \u{2713} {} created", resolver_file);
+        } else {
+            println!("      \u{2717} Failed — create it manually");
         }
     }
 
@@ -172,7 +233,8 @@ async fn step_dnsmasq_start() -> Result<()> {
             if status.success() {
                 sp.done("dnsmasq started").await;
             } else {
-                sp.fail("Failed to start — try manually: sudo brew services start dnsmasq").await;
+                sp.fail("Failed to start — try manually: sudo brew services start dnsmasq")
+                    .await;
             }
         }
     } else {
@@ -236,19 +298,31 @@ async fn check_conflicts_before_init(tld: &str) -> bool {
     let mut found: Vec<(&str, String)> = vec![];
 
     let tools: &[(&str, String)] = &[
-        ("ddev", format!("ddev manages its own DNS router and may conflict with dnsmasq (.{} domains)", tld)),
-        ("herd", format!("Laravel Herd manages DNS and nginx on port 80/443 (.{} domains)", tld)),
-        ("valet", format!("Laravel Valet manages dnsmasq and nginx on port 80/443 (.{} domains)", tld)),
+        (
+            "ddev",
+            format!(
+                "ddev manages its own DNS router and may conflict with dnsmasq (.{} domains)",
+                tld
+            ),
+        ),
+        (
+            "herd",
+            format!(
+                "Laravel Herd manages DNS and nginx on port 80/443 (.{} domains)",
+                tld
+            ),
+        ),
+        (
+            "valet",
+            format!(
+                "Laravel Valet manages dnsmasq and nginx on port 80/443 (.{} domains)",
+                tld
+            ),
+        ),
     ];
 
     for (binary, description) in tools {
-        if tokio::process::Command::new("which")
-            .arg(binary)
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
+        if is_tool_actively_conflicting(binary).await {
             found.push((*binary, description.clone()));
         }
     }
@@ -275,6 +349,46 @@ async fn check_conflicts_before_init(tld: &str) -> bool {
     println!("   configuration to avoid conflicts.\n");
 
     prompt_yn("   Continue with setup?")
+}
+
+async fn is_tool_actively_conflicting(binary: &str) -> bool {
+    let installed = Command::new("which")
+        .arg(binary)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed {
+        return false;
+    }
+
+    match binary {
+        "ddev" => Command::new("docker")
+            .args(["ps", "--format", "{{.Names}}"])
+            .output()
+            .await
+            .ok()
+            .map(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|n| n.contains("ddev-router"))
+            })
+            .unwrap_or(false),
+        "herd" => Command::new("pgrep")
+            .args(["-f", "[Hh]erd"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+        "valet" => Command::new("pgrep")
+            .args(["-f", "valet"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn prompt_tld() -> String {

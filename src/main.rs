@@ -32,6 +32,15 @@ enum Commands {
     Add,
     /// Remove all zapusk configuration
     Destroy,
+    /// Discover listening local services
+    Discover {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Import discovered service by port or pid
+        #[arg(long, value_name = "PORT_OR_PID")]
+        import: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -43,6 +52,7 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => cli::init::run().await,
         Some(Commands::Add) => cli::add::run().await,
         Some(Commands::Destroy) => cli::destroy::run().await,
+        Some(Commands::Discover { json, import }) => cli::discover::run(json, import).await,
         None => run_tui().await,
     }
 }
@@ -66,6 +76,8 @@ async fn run_tui() -> Result<()> {
     let mut app = App::new(config);
     app.detect_running().await;
     app.autostart().await;
+    app.refresh_unmanaged().await;
+    app.refresh_service_states().await;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -85,10 +97,7 @@ async fn run_tui() -> Result<()> {
     result
 }
 
-async fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|frame| tui::ui::draw(frame, app))?;
 

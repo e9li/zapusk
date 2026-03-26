@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use std::path::Path;
 use tokio::process::Command;
 
@@ -101,6 +102,7 @@ pub async fn run() -> Result<()> {
     if let Some(ref cfg) = config {
         let sp = Spinner::start("Checking projects...");
         let mut results = vec![];
+        results.extend(check_project_config_conflicts(cfg));
         for project in &cfg.projects {
             results.push(check_project(project).await);
         }
@@ -132,7 +134,10 @@ pub async fn run() -> Result<()> {
 
     println!();
     if issues > 0 {
-        println!("{} issue(s) found. Run `zapusk init` to fix setup issues.", issues);
+        println!(
+            "{} issue(s) found. Run `zapusk init` to fix setup issues.",
+            issues
+        );
     } else if warnings > 0 {
         println!("All checks passed ({} warning(s) — see above).", warnings);
     } else {
@@ -167,6 +172,11 @@ pub async fn run_quiet() -> Result<bool> {
                 issues += 1;
             }
         }
+        for r in check_project_config_conflicts(cfg) {
+            if !r.ok {
+                issues += 1;
+            }
+        }
         if let Some(ref caddy) = cfg.caddy {
             for r in check_caddy_config(caddy).await {
                 if !r.ok {
@@ -177,6 +187,60 @@ pub async fn run_quiet() -> Result<bool> {
     }
 
     Ok(issues == 0)
+}
+
+fn check_project_config_conflicts(cfg: &Config) -> Vec<CheckResult> {
+    let mut results = vec![];
+
+    let mut by_port: HashMap<u16, Vec<&str>> = HashMap::new();
+    let mut by_target: HashMap<String, Vec<&str>> = HashMap::new();
+
+    for p in &cfg.projects {
+        by_port.entry(p.port).or_default().push(&p.name);
+        let target = format!("{}:{}", normalized_upstream_host(p), p.port);
+        by_target.entry(target).or_default().push(&p.name);
+    }
+
+    for (port, names) in by_port {
+        if names.len() > 1 {
+            results.push(CheckResult::warn(
+                format!(
+                    "port {} is used by multiple projects ({})",
+                    port,
+                    names.join(", ")
+                ),
+                "if these are locally started services they will conflict; use distinct ports or explicit upstream_host values",
+            ));
+        }
+    }
+
+    for (target, names) in by_target {
+        if names.len() > 1 {
+            results.push(CheckResult::fail(
+                format!(
+                    "duplicate upstream target {} used by ({})",
+                    target,
+                    names.join(", ")
+                ),
+                "set different `upstream_host` and/or `port` per project to avoid proxy collisions",
+            ));
+        }
+    }
+
+    results
+}
+
+fn normalized_upstream_host(project: &ProjectConfig) -> String {
+    if let Some(host) = project
+        .upstream_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        host.to_ascii_lowercase()
+    } else {
+        "127.0.0.1-or-::1".into()
+    }
 }
 
 fn print_check(r: &CheckResult) {
@@ -226,9 +290,7 @@ pub async fn check_caddy() -> CheckResult {
 
 pub async fn check_dnsmasq_installed() -> CheckResult {
     match Command::new("which").arg("dnsmasq").output().await {
-        Ok(output) if output.status.success() => {
-            CheckResult::pass("dnsmasq installed")
-        }
+        Ok(output) if output.status.success() => CheckResult::pass("dnsmasq installed"),
         _ => CheckResult::fail(
             "dnsmasq not found",
             if cfg!(target_os = "macos") {
@@ -249,14 +311,32 @@ pub async fn check_dnsmasq_running() -> CheckResult {
         {
             Ok(output) => {
                 let text = String::from_utf8_lossy(&output.stdout);
-                if text.lines().any(|l| l.starts_with("dnsmasq") && l.contains("started")) {
-                    CheckResult::pass("dnsmasq running")
-                } else {
-                    CheckResult::fail("dnsmasq not running", "run: sudo brew services start dnsmasq")
+                if text
+                    .lines()
+                    .any(|l| l.starts_with("dnsmasq") && l.contains("started"))
+                {
+                    return CheckResult::pass("dnsmasq running");
                 }
             }
-            _ => CheckResult::fail("could not check dnsmasq status", "run: brew services list"),
+            Err(_) => {}
         }
+
+        // Fallback: if a dnsmasq process is running, treat as healthy even when
+        // brew services (current user context) does not report it.
+        if Command::new("pgrep")
+            .args(["-x", "dnsmasq"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return CheckResult::pass("dnsmasq running (detected via process check)");
+        }
+
+        CheckResult::fail(
+            "dnsmasq not running",
+            "run: brew services start dnsmasq (or `sudo brew services start dnsmasq`)",
+        )
     } else {
         match Command::new("systemctl")
             .args(["is-active", "dnsmasq"])
@@ -264,10 +344,7 @@ pub async fn check_dnsmasq_running() -> CheckResult {
             .await
         {
             Ok(output) if output.status.success() => CheckResult::pass("dnsmasq running"),
-            _ => CheckResult::fail(
-                "dnsmasq not running",
-                "run: sudo systemctl start dnsmasq",
-            ),
+            _ => CheckResult::fail("dnsmasq not running", "run: sudo systemctl start dnsmasq"),
         }
     }
 }
@@ -307,7 +384,11 @@ pub async fn check_dns_resolution(tld: &str) -> CheckResult {
                 CheckResult::pass(format!("*.{} resolves to 127.0.0.1", tld))
             } else {
                 CheckResult::fail(
-                    format!("*.{} resolves to {} (expected 127.0.0.1)", tld, result.trim()),
+                    format!(
+                        "*.{} resolves to {} (expected 127.0.0.1)",
+                        tld,
+                        result.trim()
+                    ),
                     format!("check dnsmasq config and /etc/resolver/{}", tld),
                 )
             }
@@ -352,7 +433,10 @@ pub async fn check_php(version: &str) -> Vec<CheckResult> {
     // Check FPM socket
     let fpm_sock = platform::php_fpm_socket_path(version);
     if Path::new(&fpm_sock).exists() {
-        results.push(CheckResult::pass(format!("php{}-fpm socket exists", version)));
+        results.push(CheckResult::pass(format!(
+            "php{}-fpm socket exists",
+            version
+        )));
     } else {
         results.push(CheckResult::fail(
             format!("php{}-fpm socket not found", version),
@@ -434,12 +518,9 @@ async fn check_conflicts(tld: &str) -> Vec<CheckResult> {
     ];
 
     for (binary, message) in tools {
-        if Command::new("which").arg(binary).output().await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
+        if is_tool_actively_conflicting(binary).await {
             results.push(CheckResult::warn(
-                format!("{} detected", binary),
+                format!("{} detected as active", binary),
                 message.clone(),
             ));
         }
@@ -467,14 +548,52 @@ async fn check_conflicts(tld: &str) -> Vec<CheckResult> {
     results
 }
 
+async fn is_tool_actively_conflicting(binary: &str) -> bool {
+    let installed = Command::new("which")
+        .arg(binary)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed {
+        return false;
+    }
+
+    match binary {
+        "ddev" => {
+            // ddev router is a docker container when ddev is active.
+            Command::new("docker")
+                .args(["ps", "--format", "{{.Names}}"])
+                .output()
+                .await
+                .ok()
+                .map(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .any(|n| n.contains("ddev-router"))
+                })
+                .unwrap_or(false)
+        }
+        "herd" => Command::new("pgrep")
+            .args(["-f", "[Hh]erd"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+        "valet" => Command::new("pgrep")
+            .args(["-f", "valet"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 async fn find_listening_process(port: u16) -> Option<(u32, String)> {
     let output = Command::new("lsof")
-        .args([
-            "-nP",
-            &format!("-iTCP:{}", port),
-            "-sTCP:LISTEN",
-            "-Fpc",
-        ])
+        .args(["-nP", &format!("-iTCP:{}", port), "-sTCP:LISTEN", "-Fpc"])
         .output()
         .await
         .ok()?;
@@ -517,7 +636,10 @@ pub async fn check_caddy_config(caddy: &crate::core::config::CaddyConfig) -> Vec
     } else {
         results.push(CheckResult::fail(
             "Caddyfile not found",
-            format!("run `zapusk` and press R to generate, or create {}", caddy.config_path),
+            format!(
+                "run `zapusk` and press R to generate, or create {}",
+                caddy.config_path
+            ),
         ));
         return results;
     }
