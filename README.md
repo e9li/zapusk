@@ -60,15 +60,22 @@ The trade-off is no container isolation. If that is acceptable for your workflow
 
 ```
 src/
-├── main.rs       # Entry point, terminal setup, render loop
-├── app.rs        # App state, keyboard handling, orchestration
-├── ui.rs         # Ratatui rendering (project list, log panel, status bar)
-├── project.rs    # Project model (config + runtime state + log ring buffer)
-├── manager.rs    # Child process spawning, stdout/stderr streaming via tokio
-├── caddy.rs      # Caddyfile generation and `caddy reload`
-├── config.rs     # TOML config deserialization
-├── init.rs       # `zapusk init` — interactive first-run setup        [TODO]
-└── doctor.rs     # `zapusk doctor` — dependency checks                [TODO]
+├── main.rs           # Entry point, terminal setup, render loop
+├── platform.rs       # All OS-specific logic (macOS vs Linux)
+├── tui/
+│   ├── app.rs        # App state, orchestration, process actions
+│   ├── input.rs      # Keyboard handling (extracted from app)
+│   └── ui.rs         # Ratatui rendering (project list, log panel, status bar)
+├── core/
+│   ├── project.rs    # Project model (config + runtime state + log ring buffer)
+│   ├── manager.rs    # Child process spawning, stdout/stderr streaming via tokio
+│   ├── caddy.rs      # Caddyfile generation and `caddy reload`
+│   └── config.rs     # TOML config deserialization + ProjectType
+└── cli/
+    ├── doctor.rs     # `zapusk doctor` — dependency checks
+    ├── init.rs       # `zapusk init` — interactive first-run setup
+    ├── add.rs        # `zapusk add` — add project interactively
+    └── destroy.rs    # `zapusk destroy` — remove all zapusk configuration
 ```
 
 ---
@@ -81,7 +88,8 @@ src/
 zapusk              # open TUI
 zapusk init         # interactive first-run setup
 zapusk doctor       # check all dependencies
-zapusk add          # add a project to config interactively    [TODO]
+zapusk add          # add a project to config interactively
+zapusk destroy      # remove all zapusk configuration
 ```
 
 ---
@@ -91,30 +99,12 @@ zapusk add          # add a project to config interactively    [TODO]
 Checks that everything required to run the full stack is present and correctly configured.
 Should be runnable at any time, not just on first install.
 
-### Checks to implement (`src/doctor.rs`)
+### Checks performed
 
-#### System dependencies
-- [ ] `caddy` binary in PATH — run `caddy version` and parse output
-- [ ] `dnsmasq` installed — check via `which dnsmasq` or package manager
-- [ ] dnsmasq config has `address=/.test/127.0.0.1` — read and scan config file
-- [ ] dnsmasq is running — `systemctl is-active dnsmasq` (Linux) or `brew services list` (macOS)
-- [ ] DNS resolves correctly — try resolving `zapusk-check.test` via system resolver
-
-#### PHP (only checked if any Kirby/PHP projects exist in config)
-- [ ] Each required PHP version installed at expected Homebrew path
-- [ ] PHP-FPM service running for each required version
-- [ ] FPM socket file exists and is accessible
-
-#### Per-project checks
-- [ ] Project `path` exists on disk
-- [ ] For Phoenix: `mix` in PATH, `mix.exs` present in project path
-- [ ] For Symfony: `symfony` CLI in PATH, `composer.json` present
-- [ ] For Axum: `cargo` in PATH, `Cargo.toml` present
-- [ ] Port not already occupied by another process
-
-#### Caddy
-- [ ] Caddyfile exists at configured path (or has been generated)
-- [ ] `caddy validate --config <path>` passes
+- **System:** caddy binary, dnsmasq installed/running/configured, DNS resolution
+- **PHP:** per-version binary and FPM socket (only if Kirby projects exist)
+- **Projects:** path exists, expected files present, required binaries in PATH
+- **Caddy:** Caddyfile exists, `caddy validate` passes
 
 ### Output format
 
@@ -154,7 +144,7 @@ Caddy
 Interactive first-run wizard. Guides the user through installing and configuring the full stack.
 Should be idempotent — safe to re-run to fix a broken setup.
 
-### Flow to implement (`src/init.rs`)
+### Flow
 
 ```
 Welcome to zapusk!
@@ -203,12 +193,17 @@ Setup complete. Run `zapusk` to open the TUI.
 | Key | Action |
 |-----|--------|
 | `s` | Start selected project |
-| `x` | Stop selected project |
+| `x` | Stop selected project (with confirmation) |
 | `r` | Restart selected project |
 | `R` | Regenerate Caddyfile + reload Caddy |
 | `o` | Open project domain in browser |
+| `c` | Copy domain to clipboard |
+| `d` | Show project detail popup |
+| `/` | Search / filter logs |
 | `tab` | Switch focus between project list and logs |
 | `j/k` or `↑/↓` | Navigate project list |
+| `PgUp/PgDn` | Scroll logs |
+| `G` or `End` | Jump to latest logs |
 | `q` | Quit (stops all running projects) |
 
 ---
@@ -218,6 +213,8 @@ Setup complete. Run `zapusk` to open the TUI.
 ```toml
 # ~/.config/zapusk/config.toml
 
+# tld = "test"            # optional: TLD for wildcard DNS (default: "test")
+
 [[projects]]
 name = "myshop"
 domain = "myshop.test"
@@ -225,6 +222,7 @@ port = 4000
 type = "phoenix"
 path = "/home/user/projects/myshop"
 autostart = false          # optional: start automatically on zapusk launch
+tls = true                 # optional: enable https:// + `tls internal`
 
 [[projects]]
 name = "company-site"
@@ -247,6 +245,8 @@ domain = "api.test"
 port = 3000
 type = "axum"
 path = "/home/user/projects/api"
+command = "cargo"         # optional: command override
+args = ["run", "--bin", "api"]
 
 [caddy]
 config_path = "/home/user/.config/zapusk/Caddyfile"
@@ -255,40 +255,12 @@ config_path = "/home/user/.config/zapusk/Caddyfile"
 
 ---
 
-## TODO / Ideas for Claude Code
-
-### High priority — core correctness
-- [ ] `src/doctor.rs` — implement full dependency check (see spec above)
-- [ ] `src/init.rs` — implement init wizard (see spec above)
-- [ ] Wire subcommands in `main.rs` — parse `argv[1]` for `init` / `doctor` / `add`,
-      fall through to TUI when no subcommand given
-- [ ] Fix process exit detection in `manager.rs` — use `child.wait()` in a
-      dedicated tokio task, send `ManagerEvent::ProcessExited` properly
-- [ ] Detect port already in use before starting, show friendly error
-- [ ] Parse `.php-version` file in Symfony project path for Symfony CLI compat
-
-### UI improvements
-- [ ] Scrollable log panel (scroll offset in App state, PageUp/PageDown/mouse wheel)
-- [ ] Log search / filter (`/` to enter search mode, Esc to exit)
-- [ ] Colour-code log lines by severity (scan for `error`, `warn`, `info` tokens)
-- [ ] Show port + uptime in project list
-- [ ] Popup/modal for project details (domain, path, pid, full command)
-- [ ] Confirmation dialog before stopping a running project
-
-### Config
-- [ ] Watch config file for changes and hot-reload project list
-- [ ] Support `env` map per project (forwarded to child process environment)
-- [ ] Support `command` override per project (bypass built-in defaults)
-- [ ] Make PHP-FPM socket path a config option (Linux paths differ from macOS Homebrew)
+## TODO / Ideas
 
 ### Features
-- [ ] `o` key: open project domain in browser (`open` on macOS, `xdg-open` on Linux)
-- [ ] `c` key: copy domain to clipboard
-- [ ] `autostart = true` in config: start those projects when zapusk launches
+- [ ] Watch config file for changes and hot-reload project list
 - [ ] Pidfile to detect projects left running from a previous session
-- [ ] TLS support: `tls = true` per project — use `https://` in Caddyfile, run `caddy trust`
 
-### CLI
-- [ ] `zapusk add` — interactive prompt to append a project to config
+### Distribution
 - [ ] Shell completions (bash, zsh, fish) via `clap`
 - [ ] Homebrew formula

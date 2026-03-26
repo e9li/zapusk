@@ -7,8 +7,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivePane, App};
-use crate::project::{Project, ProjectStatus};
+use super::app::{ActivePane, AddField, AddForm, App};
+use crate::core::project::{Project, ProjectStatus};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -36,6 +36,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
     }
 
+    // Overlay: help
+    if app.show_help {
+        draw_help(frame);
+    }
+
+    // Overlay: add form
+    if let Some(form) = &app.add_form {
+        draw_add_form(frame, form);
+    }
+
     // Overlay: confirmation dialog
     if let Some(dialog) = &app.confirm_dialog {
         draw_confirm_dialog(frame, &dialog.message);
@@ -50,13 +60,34 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(focus_style(focused));
 
+    if app.projects.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No projects configured",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Press 'a' to add a project",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "  or run: zapusk add",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(block);
+        frame.render_widget(empty, area);
+        return;
+    }
+
     let items: Vec<ListItem> = app
         .projects
         .iter()
         .map(|project| {
             let (status_icon, status_color) = match &project.status {
                 ProjectStatus::Running => ("\u{25cf}", Color::Green),
-                ProjectStatus::Starting => ("\u{25cc}", Color::Yellow),
                 ProjectStatus::Stopped => ("\u{25cb}", Color::DarkGray),
                 ProjectStatus::Failed(_) => ("\u{2717}", Color::Red),
             };
@@ -147,10 +178,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
             let color = log_color(&entry.line, entry.is_stderr);
             let ts = entry.timestamp.format("%H:%M:%S").to_string();
             Line::from(vec![
-                Span::styled(
-                    format!("{} ", ts),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("{} ", ts), Style::default().fg(Color::DarkGray)),
                 Span::styled(entry.line.clone(), Style::default().fg(color)),
             ])
         })
@@ -160,10 +188,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     if app.search_mode {
         text.push(Line::from(vec![
             Span::styled("/", Style::default().fg(Color::Yellow)),
-            Span::styled(
-                app.search_query.clone(),
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(app.search_query.clone(), Style::default().fg(Color::White)),
             Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
         ]));
     } else if !app.search_query.is_empty() {
@@ -179,31 +204,41 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let message = app
-        .status_message
-        .as_deref()
-        .unwrap_or("");
+    let message = app.status_message.as_deref().unwrap_or("");
 
-    let hints = " s start  x stop  r restart  R caddy  o open  d detail  / search  q quit";
+    let key_style = Style::default().fg(Color::Black).bg(Color::DarkGray);
+    let label_style = Style::default().fg(Color::Gray);
+    let sep = Span::styled(" ", Style::default());
 
-    let line = Line::from(vec![
-        Span::styled(
-            format!(" {:<30}", message),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::styled(hints, Style::default().fg(Color::DarkGray)),
-    ]);
+    let mut spans = vec![Span::styled(
+        format!(" {} ", message),
+        Style::default().fg(Color::Yellow),
+    )];
 
-    let bar = Paragraph::new(line)
-        .style(Style::default().bg(Color::Black));
+    // Only show a few essential hints — full list is in ? help
+    let keys: &[(&str, &str)] = &[
+        ("s", "start"),
+        ("x", "stop"),
+        ("r", "restart"),
+        ("a", "add"),
+        ("?", "help"),
+        ("q", "quit"),
+    ];
+
+    for (key, label) in keys {
+        spans.push(sep.clone());
+        spans.push(Span::styled(format!(" {} ", key), key_style));
+        spans.push(Span::styled(label.to_string(), label_style));
+    }
+
+    let line = Line::from(spans);
+    let bar = Paragraph::new(line).style(Style::default().bg(Color::Black));
 
     frame.render_widget(bar, area);
 }
@@ -224,7 +259,10 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
         Line::from(format!("  Name:    {}", project.config.name)),
         Line::from(format!("  Domain:  {}", project.config.domain)),
         Line::from(format!("  Port:    {}", project.config.port)),
-        Line::from(format!("  Type:    {}", project.config.project_type.label())),
+        Line::from(format!(
+            "  Type:    {}",
+            project.config.project_type.label()
+        )),
         Line::from(format!("  Path:    {}", project.config.path)),
         Line::from(format!("  Status:  {}", project.status.label())),
         Line::from(format!(
@@ -243,6 +281,176 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
         .block(
             Block::default()
                 .title(" Project Details ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(popup, area);
+}
+
+fn draw_help(frame: &mut Frame) {
+    let area = centered_rect(55, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let desc_style = Style::default().fg(Color::White);
+    let section_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let entries: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled("  Projects", section_style)),
+        help_line("  s", "Start selected project", key_style, desc_style),
+        help_line("  x", "Stop selected project", key_style, desc_style),
+        help_line("  r", "Restart selected project", key_style, desc_style),
+        help_line("  a", "Add a new project", key_style, desc_style),
+        help_line("  D", "Remove selected project", key_style, desc_style),
+        help_line("  d", "Show project details", key_style, desc_style),
+        help_line("  o", "Open in browser", key_style, desc_style),
+        help_line("  c", "Copy domain to clipboard", key_style, desc_style),
+        Line::from(""),
+        Line::from(Span::styled("  Navigation", section_style)),
+        help_line("  j/k", "Move up/down", key_style, desc_style),
+        help_line(
+            "  Tab",
+            "Switch pane (projects/logs)",
+            key_style,
+            desc_style,
+        ),
+        help_line("  PgUp/PgDn", "Scroll logs", key_style, desc_style),
+        help_line("  G", "Jump to latest log", key_style, desc_style),
+        Line::from(""),
+        Line::from(Span::styled("  Other", section_style)),
+        help_line("  /", "Search/filter logs", key_style, desc_style),
+        help_line("  R", "Reload Caddy config", key_style, desc_style),
+        help_line("  ?", "Toggle this help", key_style, desc_style),
+        help_line("  q", "Quit", key_style, desc_style),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Press Esc or ? to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let popup = Paragraph::new(entries)
+        .block(
+            Block::default()
+                .title(" Keybindings ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(popup, area);
+}
+
+fn help_line<'a>(key: &'a str, desc: &'a str, key_style: Style, desc_style: Style) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{:<14}", key), key_style),
+        Span::styled(desc, desc_style),
+    ])
+}
+
+fn draw_add_form(frame: &mut Frame, form: &AddForm) {
+    let area = centered_rect(60, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let type_active = matches!(form.field, AddField::Type);
+
+    // Text fields
+    let text_fields: &[(&str, &str, bool)] = &[
+        ("Name", &form.name, matches!(form.field, AddField::Name)),
+        (
+            "Domain",
+            &form.domain,
+            matches!(form.field, AddField::Domain),
+        ),
+        ("Port", &form.port, matches!(form.field, AddField::Port)),
+    ];
+
+    let mut lines = vec![Line::from("")];
+
+    for &(label, value, active) in text_fields {
+        let (label_color, value_str) = if active {
+            (Color::Cyan, format!("{}\u{2588}", value))
+        } else if value.is_empty() {
+            (Color::DarkGray, "-".into())
+        } else {
+            (Color::DarkGray, value.to_string())
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<10}", label), Style::default().fg(label_color)),
+            Span::styled(value_str, Style::default().fg(Color::White)),
+        ]));
+    }
+
+    // Type field — selector with all options shown
+    let label_color = if type_active {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let mut type_spans = vec![Span::styled(
+        format!("  {:<10}", "Type"),
+        Style::default().fg(label_color),
+    )];
+    let options = super::app::TYPE_OPTIONS;
+    for (i, opt) in options.iter().enumerate() {
+        if i == form.type_index {
+            type_spans.push(Span::styled(
+                format!(" {} ", opt),
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            ));
+        } else {
+            type_spans.push(Span::styled(
+                format!(" {} ", opt),
+                Style::default().fg(if type_active {
+                    Color::White
+                } else {
+                    Color::DarkGray
+                }),
+            ));
+        }
+    }
+    lines.push(Line::from(type_spans));
+
+    // Path field
+    let path_active = matches!(form.field, AddField::Path);
+    let (path_label_color, path_str) = if path_active {
+        (Color::Cyan, format!("{}\u{2588}", form.path))
+    } else if form.path.is_empty() {
+        (Color::DarkGray, "-".into())
+    } else {
+        (Color::DarkGray, form.path.clone())
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {:<10}", "Directory"),
+            Style::default().fg(path_label_color),
+        ),
+        Span::styled(path_str, Style::default().fg(Color::White)),
+    ]));
+
+    lines.push(Line::from(""));
+    let hint = if type_active {
+        "  \u{2190}/\u{2192} select type  Enter: next  Esc: cancel"
+    } else {
+        "  Enter: next field  Esc: cancel"
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let popup = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Add Project ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )

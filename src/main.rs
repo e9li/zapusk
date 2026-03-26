@@ -1,12 +1,7 @@
-mod add;
-mod app;
-mod caddy;
-mod config;
-mod doctor;
-mod init;
-mod manager;
-mod project;
-mod ui;
+mod cli;
+mod core;
+mod platform;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -17,8 +12,8 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
-use app::App;
-use config::Config;
+use core::config::Config;
+use tui::app::App;
 
 #[derive(Parser)]
 #[command(name = "zapusk", about = "Local dev project manager")]
@@ -35,6 +30,8 @@ enum Commands {
     Init,
     /// Add a project interactively
     Add,
+    /// Remove all zapusk configuration
+    Destroy,
 }
 
 #[tokio::main]
@@ -42,16 +39,32 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Doctor) => doctor::run().await,
-        Some(Commands::Init) => init::run().await,
-        Some(Commands::Add) => add::run().await,
+        Some(Commands::Doctor) => cli::doctor::run().await,
+        Some(Commands::Init) => cli::init::run().await,
+        Some(Commands::Add) => cli::add::run().await,
+        Some(Commands::Destroy) => cli::destroy::run().await,
         None => run_tui().await,
     }
 }
 
 async fn run_tui() -> Result<()> {
-    let config = Config::load()?;
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            let path = core::config::config_path();
+            eprintln!("No config found at {}\n", path.display());
+            eprintln!("Get started:");
+            eprintln!("  zapusk init          Set up dnsmasq + Caddy");
+            eprintln!("  zapusk add           Add your first project");
+            eprintln!(
+                "\nOr create {} manually — see config.example.toml for the format.",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+    };
     let mut app = App::new(config);
+    app.detect_running().await;
     app.autostart().await;
 
     // Setup terminal
@@ -77,7 +90,7 @@ async fn run(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        terminal.draw(|frame| tui::ui::draw(frame, app))?;
 
         app.tick().await?;
 
