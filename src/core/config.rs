@@ -15,6 +15,10 @@ pub struct Config {
     #[serde(default, rename = "projects")]
     pub projects: Vec<ProjectConfig>,
     pub caddy: Option<CaddyConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_services: Vec<IgnoredService>,
 }
 
 fn default_tld() -> String {
@@ -34,6 +38,10 @@ pub struct ProjectConfig {
     /// Custom command override (bypasses built-in start_command)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Optional reverse-proxy upstream host override (default: loopback fallback).
+    /// Examples: "127.0.0.1", "localhost", "192.168.1.20"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
     /// Structured command args for `command`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -142,6 +150,28 @@ pub struct CaddyConfig {
     /// Template for PHP-FPM socket path, with {version} placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fpm_socket_template: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DiscoveryConfig {
+    #[serde(default = "default_web_ports")]
+    pub web_ports: Vec<String>,
+}
+
+fn default_web_ports() -> Vec<String> {
+    vec![
+        "80".into(),
+        "443".into(),
+        "8080".into(),
+        "8443".into(),
+        "3000-9999".into(),
+    ]
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IgnoredService {
+    pub port: u16,
+    pub command: String,
 }
 
 impl Config {

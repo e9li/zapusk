@@ -13,6 +13,12 @@ pub enum ProjectStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessOrigin {
+    Managed,
+    Adopted,
+}
+
 impl ProjectStatus {
     pub fn label(&self) -> &str {
         match self {
@@ -48,6 +54,8 @@ pub struct Project {
     pub logs: VecDeque<LogEntry>,
     /// Process ID if running
     pub pid: Option<u32>,
+    /// Whether the running process was spawned by zapusk or adopted
+    pub origin: Option<ProcessOrigin>,
     /// When the process was started (for uptime display)
     pub started_at: Option<DateTime<Local>>,
 }
@@ -59,6 +67,7 @@ impl Project {
             status: ProjectStatus::Stopped,
             logs: VecDeque::with_capacity(LOG_BUFFER_SIZE),
             pid: None,
+            origin: None,
             started_at: None,
         }
     }

@@ -1,15 +1,18 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::platform;
 use super::app::{AddForm, App};
+use crate::platform;
 
 impl App {
     /// Handle a keyboard event (dispatched from tick after Ctrl+C check)
     pub(crate) async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // Add form input
         if let Some(ref mut form) = self.add_form {
-            let is_type_field = matches!(form.field, super::app::AddField::Type);
+            let is_selector_field = matches!(
+                form.field,
+                super::app::AddField::Type | super::app::AddField::Tls
+            );
 
             match key.code {
                 KeyCode::Esc => {
@@ -18,32 +21,108 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let val = form.current_value().to_string();
-                    if val.is_empty() && matches!(form.field, super::app::AddField::Name | super::app::AddField::Path) {
+                    if val.is_empty()
+                        && matches!(
+                            form.field,
+                            super::app::AddField::Name | super::app::AddField::Path
+                        )
+                    {
                         self.status_message = Some(format!("{} cannot be empty", form.label()));
                         return Ok(());
                     }
-                    if matches!(form.field, super::app::AddField::Path) && !std::path::Path::new(&val).is_dir() {
+                    if matches!(form.field, super::app::AddField::Path)
+                        && !std::path::Path::new(&val).is_dir()
+                    {
                         self.status_message = Some(format!("Directory not found: {}", val));
                         return Ok(());
                     }
                     let tld = self.config.tld.clone();
                     if form.next_field(&tld) {
-                        let completed = self.add_form.take().unwrap();
-                        self.finalize_add(completed).await;
+                        if let Some(completed) = self.add_form.take() {
+                            self.finalize_add(completed).await;
+                        }
                     }
                 }
-                // Type field: cycle with arrows/tab, no freetext
-                KeyCode::Right | KeyCode::Tab if is_type_field => {
-                    form.cycle_type_next();
+                // Selector fields: type cycles, TLS toggles
+                KeyCode::Right | KeyCode::Tab if is_selector_field => {
+                    if matches!(form.field, super::app::AddField::Type) {
+                        form.cycle_type_next();
+                    } else {
+                        form.toggle_tls();
+                    }
                 }
-                KeyCode::Left | KeyCode::BackTab if is_type_field => {
-                    form.cycle_type_prev();
+                KeyCode::Left | KeyCode::BackTab if is_selector_field => {
+                    if matches!(form.field, super::app::AddField::Type) {
+                        form.cycle_type_prev();
+                    } else {
+                        form.toggle_tls();
+                    }
                 }
                 // Other fields: freetext
-                KeyCode::Backspace if !is_type_field => {
+                KeyCode::Backspace if !is_selector_field => {
                     form.current_value_mut().pop();
                 }
-                KeyCode::Char(c) if !is_type_field => {
+                KeyCode::Char(c) if !is_selector_field => {
+                    form.current_value_mut().push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Edit form input
+        if let Some(ref mut form) = self.edit_form {
+            let is_selector_field = matches!(
+                form.field,
+                super::app::AddField::Type | super::app::AddField::Tls
+            );
+
+            match key.code {
+                KeyCode::Esc => {
+                    self.edit_form = None;
+                    self.status_message = Some("Cancelled".into());
+                }
+                KeyCode::Enter => {
+                    let val = form.current_value().to_string();
+                    if val.is_empty()
+                        && matches!(
+                            form.field,
+                            super::app::AddField::Name | super::app::AddField::Path
+                        )
+                    {
+                        self.status_message = Some(format!("{} cannot be empty", form.label()));
+                        return Ok(());
+                    }
+                    if matches!(form.field, super::app::AddField::Path)
+                        && !std::path::Path::new(&val).is_dir()
+                    {
+                        self.status_message = Some(format!("Directory not found: {}", val));
+                        return Ok(());
+                    }
+                    if form.next_field() {
+                        if let Some(completed) = self.edit_form.take() {
+                            self.finalize_edit(completed).await;
+                        }
+                    }
+                }
+                KeyCode::Right | KeyCode::Tab if is_selector_field => {
+                    if matches!(form.field, super::app::AddField::Type) {
+                        form.cycle_type_next();
+                    } else {
+                        form.toggle_tls();
+                    }
+                }
+                KeyCode::Left | KeyCode::BackTab if is_selector_field => {
+                    if matches!(form.field, super::app::AddField::Type) {
+                        form.cycle_type_prev();
+                    } else {
+                        form.toggle_tls();
+                    }
+                }
+                KeyCode::Backspace if !is_selector_field => {
+                    form.current_value_mut().pop();
+                }
+                KeyCode::Char(c) if !is_selector_field => {
                     form.current_value_mut().push(c);
                 }
                 _ => {}
@@ -102,6 +181,35 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('d') => {
                     self.show_detail_popup = false;
                 }
+                KeyCode::Char('D') | KeyCode::Delete => {
+                    self.show_detail_popup = false;
+                    self.confirm_remove_selected();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Unmanaged services popup
+        if self.show_unmanaged_popup {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('u') => {
+                    if self.show_unmanaged_detail {
+                        self.show_unmanaged_detail = false;
+                    } else {
+                        self.show_unmanaged_popup = false;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.select_unmanaged_next(),
+                KeyCode::Up | KeyCode::Char('k') => self.select_unmanaged_prev(),
+                KeyCode::Enter => {
+                    self.show_unmanaged_detail = !self.show_unmanaged_detail;
+                }
+                KeyCode::Char('r') => self.refresh_unmanaged().await,
+                KeyCode::Char('f') => self.toggle_unmanaged_filter(),
+                KeyCode::Char('w') => self.toggle_unmanaged_web_filter(),
+                KeyCode::Char('i') => self.import_selected_unmanaged().await,
+                KeyCode::Char('I') => self.ignore_selected_unmanaged().await,
                 _ => {}
             }
             return Ok(());
@@ -110,6 +218,7 @@ impl App {
         match key.code {
             // Quit
             KeyCode::Char('q') => self.quit().await,
+            KeyCode::Char('Q') => self.force_quit().await,
 
             // Navigation
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
@@ -141,17 +250,24 @@ impl App {
 
             // Add project
             KeyCode::Char('a') => {
+                self.edit_form = None;
                 self.add_form = Some(AddForm::new());
                 self.status_message = Some("Adding project...".into());
             }
 
+            // Edit project
+            KeyCode::Char('e') => self.start_edit_selected(),
+
             // Remove project
-            KeyCode::Char('D') => self.confirm_remove_selected(),
+            KeyCode::Char('D') | KeyCode::Delete => self.confirm_remove_selected(),
 
             // Help
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
+
+            // Unmanaged services
+            KeyCode::Char('u') => self.toggle_unmanaged_popup().await,
 
             // Detail popup
             KeyCode::Char('d') => {
