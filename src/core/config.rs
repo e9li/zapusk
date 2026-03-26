@@ -1,16 +1,27 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
-#[derive(Debug, Deserialize, Clone)]
+use crate::platform;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
-    #[serde(rename = "projects")]
+    /// Top-level domain for wildcard DNS (default: "test")
+    #[serde(default = "default_tld")]
+    pub tld: String,
+    #[serde(default, rename = "projects")]
     pub projects: Vec<ProjectConfig>,
     pub caddy: Option<CaddyConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+fn default_tld() -> String {
+    "test".into()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProjectConfig {
     pub name: String,
     pub domain: String,
@@ -21,26 +32,33 @@ pub struct ProjectConfig {
     /// Only relevant for Kirby projects
     pub php_version: Option<String>,
     /// Custom command override (bypasses built-in start_command)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Structured command args for `command`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// Extra environment variables forwarded to the child process
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
     /// Start this project automatically when zapusk launches
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub autostart: bool,
     /// Enable TLS via Caddy (uses `tls internal` for local certs)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub tls: bool,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectType {
     Phoenix,
     Symfony,
     Kirby,
     Axum,
-    // TODO: add more as needed
 }
 
 impl ProjectType {
@@ -57,10 +75,7 @@ impl ProjectType {
     /// The command is run from the project's `path`.
     pub fn start_command(&self, config: &ProjectConfig) -> (String, Vec<String>) {
         match self {
-            ProjectType::Phoenix => (
-                "mix".into(),
-                vec!["phx.server".into()],
-            ),
+            ProjectType::Phoenix => ("mix".into(), vec!["phx.server".into()]),
             ProjectType::Symfony => {
                 let mut args = vec![
                     "server:start".into(),
@@ -80,7 +95,7 @@ impl ProjectType {
                 ("symfony".into(), args)
             }
             ProjectType::Kirby => {
-                let php_bin = php_binary(config.php_version.as_deref());
+                let php_bin = platform::php_binary_path(config.php_version.as_deref());
                 (
                     php_bin,
                     vec![
@@ -91,43 +106,69 @@ impl ProjectType {
                     ],
                 )
             }
-            ProjectType::Axum => (
-                "cargo".into(),
-                vec!["run".into()],
+            ProjectType::Axum => ("cargo".into(), vec!["run".into()]),
+        }
+    }
+}
+
+impl fmt::Display for ProjectType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl FromStr for ProjectType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "phoenix" => Ok(ProjectType::Phoenix),
+            "symfony" => Ok(ProjectType::Symfony),
+            "kirby" => Ok(ProjectType::Kirby),
+            "axum" => Ok(ProjectType::Axum),
+            other => anyhow::bail!(
+                "Unknown project type: '{}'. Use: phoenix, symfony, kirby, axum",
+                other
             ),
         }
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CaddyConfig {
     pub config_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub caddy_bin: Option<String>,
     /// Template for PHP-FPM socket path, with {version} placeholder.
-    /// Defaults to "/opt/homebrew/var/run/php/php{version}-fpm.sock" on macOS.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fpm_socket_template: Option<String>,
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path();
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Could not read config at {:?}\nCreate one based on config.example.toml", path))?;
+        let content = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Could not read config at {:?}\nCreate one based on config.example.toml",
+                path
+            )
+        })?;
 
         toml::from_str(&content).context("Failed to parse config.toml")
+    }
+
+    /// Load TLD from config, falling back to "test" if config doesn't exist.
+    pub fn tld_or_default() -> String {
+        Config::load()
+            .map(|c| c.tld)
+            .unwrap_or_else(|_| default_tld())
     }
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
         .join("zapusk")
         .join("config.toml")
-}
-
-fn php_binary(version: Option<&str>) -> String {
-    match version {
-        Some(v) => format!("/opt/homebrew/opt/php@{}/bin/php", v),
-        None => "php".into(),
-    }
 }

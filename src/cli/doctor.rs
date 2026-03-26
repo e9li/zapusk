@@ -2,12 +2,16 @@ use anyhow::Result;
 use std::path::Path;
 use tokio::process::Command;
 
-use crate::config::{Config, ProjectConfig, ProjectType};
+use crate::cli::spinner::Spinner;
+use crate::core::config::{Config, ProjectConfig, ProjectType};
+use crate::platform;
 
 pub struct CheckResult {
     pub ok: bool,
     pub detail: String,
     pub fix_hint: Option<String>,
+    /// Warning — not a hard failure, just informational
+    pub is_warning: bool,
 }
 
 impl CheckResult {
@@ -16,6 +20,7 @@ impl CheckResult {
             ok: true,
             detail: detail.into(),
             fix_hint: None,
+            is_warning: false,
         }
     }
 
@@ -24,20 +29,51 @@ impl CheckResult {
             ok: false,
             detail: detail.into(),
             fix_hint: Some(hint.into()),
+            is_warning: false,
+        }
+    }
+
+    fn warn(detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            detail: detail.into(),
+            fix_hint: Some(hint.into()),
+            is_warning: true,
         }
     }
 }
 
 pub async fn run() -> Result<()> {
     let config = Config::load().ok();
+    let tld = config.as_ref().map(|c| c.tld.as_str()).unwrap_or("test");
     let mut issues = 0;
+    let mut warnings = 0;
+
+    // Conflicts (always check, even without config)
+    {
+        let sp = Spinner::start("Checking for conflicts...");
+        let conflicts = check_conflicts(tld).await;
+        sp.clear().await;
+        if !conflicts.is_empty() {
+            println!("\nConflicts");
+            for r in &conflicts {
+                print_check(r);
+                warnings += 1;
+            }
+        }
+    }
 
     // System checks
-    println!("\nSystem");
-    for r in check_system().await {
-        print_check(&r);
-        if !r.ok {
-            issues += 1;
+    {
+        let sp = Spinner::start("Checking system dependencies...");
+        let results = check_system(tld).await;
+        sp.clear().await;
+        println!("\nSystem");
+        for r in results {
+            print_check(&r);
+            if !r.ok {
+                issues += 1;
+            }
         }
     }
 
@@ -45,13 +81,17 @@ pub async fn run() -> Result<()> {
     if let Some(ref cfg) = config {
         let php_versions = collect_php_versions(cfg);
         if !php_versions.is_empty() {
-            println!("\nPHP");
+            let sp = Spinner::start("Checking PHP installations...");
+            let mut results = vec![];
             for v in &php_versions {
-                for r in check_php(v).await {
-                    print_check(&r);
-                    if !r.ok {
-                        issues += 1;
-                    }
+                results.extend(check_php(v).await);
+            }
+            sp.clear().await;
+            println!("\nPHP");
+            for r in results {
+                print_check(&r);
+                if !r.ok {
+                    issues += 1;
                 }
             }
         }
@@ -59,9 +99,14 @@ pub async fn run() -> Result<()> {
 
     // Per-project checks
     if let Some(ref cfg) = config {
-        println!("\nProjects");
+        let sp = Spinner::start("Checking projects...");
+        let mut results = vec![];
         for project in &cfg.projects {
-            let r = check_project(project).await;
+            results.push(check_project(project).await);
+        }
+        sp.clear().await;
+        println!("\nProjects");
+        for r in results {
             print_check(&r);
             if !r.ok {
                 issues += 1;
@@ -72,8 +117,11 @@ pub async fn run() -> Result<()> {
     // Caddy config checks
     if let Some(ref cfg) = config {
         if let Some(ref caddy) = cfg.caddy {
+            let sp = Spinner::start("Validating Caddy config...");
+            let results = check_caddy_config(caddy).await;
+            sp.clear().await;
             println!("\nCaddy");
-            for r in check_caddy_config(caddy).await {
+            for r in results {
                 print_check(&r);
                 if !r.ok {
                     issues += 1;
@@ -85,6 +133,8 @@ pub async fn run() -> Result<()> {
     println!();
     if issues > 0 {
         println!("{} issue(s) found. Run `zapusk init` to fix setup issues.", issues);
+    } else if warnings > 0 {
+        println!("All checks passed ({} warning(s) — see above).", warnings);
     } else {
         println!("All checks passed.");
     }
@@ -92,9 +142,51 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Run all doctor checks silently and return whether everything passed.
+pub async fn run_quiet() -> Result<bool> {
+    let config = Config::load().ok();
+    let tld = config.as_ref().map(|c| c.tld.as_str()).unwrap_or("test");
+    let mut issues = 0;
+
+    for r in check_system(tld).await {
+        if !r.ok && !r.is_warning {
+            issues += 1;
+        }
+    }
+
+    if let Some(ref cfg) = config {
+        for v in &collect_php_versions(cfg) {
+            for r in check_php(v).await {
+                if !r.ok {
+                    issues += 1;
+                }
+            }
+        }
+        for project in &cfg.projects {
+            if !check_project(project).await.ok {
+                issues += 1;
+            }
+        }
+        if let Some(ref caddy) = cfg.caddy {
+            for r in check_caddy_config(caddy).await {
+                if !r.ok {
+                    issues += 1;
+                }
+            }
+        }
+    }
+
+    Ok(issues == 0)
+}
+
 fn print_check(r: &CheckResult) {
-    let icon = if r.ok { "  \u{2713}" } else { "  \u{2717}" };
-    println!("{} {}", icon, r.detail);
+    if r.ok {
+        println!("  \u{2713} {}", r.detail);
+    } else if r.is_warning {
+        println!("  \u{26a0} {}", r.detail);
+    } else {
+        println!("  \u{2717} {}", r.detail);
+    }
     if let Some(hint) = &r.fix_hint {
         println!("    \u{2192} {}", hint);
     }
@@ -102,23 +194,14 @@ fn print_check(r: &CheckResult) {
 
 // --- System checks ---
 
-pub async fn check_system() -> Vec<CheckResult> {
+pub async fn check_system(tld: &str) -> Vec<CheckResult> {
     let mut results = vec![];
 
-    // caddy
     results.push(check_caddy().await);
-
-    // dnsmasq installed
     results.push(check_dnsmasq_installed().await);
-
-    // dnsmasq running
     results.push(check_dnsmasq_running().await);
-
-    // dnsmasq config
-    results.push(check_dnsmasq_config().await);
-
-    // DNS resolution
-    results.push(check_dns_resolution().await);
+    results.push(check_dnsmasq_config(tld).await);
+    results.push(check_dns_resolution(tld).await);
 
     results
 }
@@ -169,7 +252,7 @@ pub async fn check_dnsmasq_running() -> CheckResult {
                 if text.lines().any(|l| l.starts_with("dnsmasq") && l.contains("started")) {
                     CheckResult::pass("dnsmasq running")
                 } else {
-                    CheckResult::fail("dnsmasq not running", "run: brew services start dnsmasq")
+                    CheckResult::fail("dnsmasq not running", "run: sudo brew services start dnsmasq")
                 }
             }
             _ => CheckResult::fail("could not check dnsmasq status", "run: brew services list"),
@@ -189,21 +272,18 @@ pub async fn check_dnsmasq_running() -> CheckResult {
     }
 }
 
-pub async fn check_dnsmasq_config() -> CheckResult {
-    let config_path = if cfg!(target_os = "macos") {
-        "/opt/homebrew/etc/dnsmasq.conf"
-    } else {
-        "/etc/dnsmasq.conf"
-    };
+pub async fn check_dnsmasq_config(tld: &str) -> CheckResult {
+    let config_path = platform::dnsmasq_config_path();
+    let expected = format!("address=/.{}/127.0.0.1", tld);
 
     match std::fs::read_to_string(config_path) {
         Ok(content) => {
-            if content.contains("address=/.test/127.0.0.1") {
-                CheckResult::pass("dnsmasq configured for *.test")
+            if content.contains(&expected) {
+                CheckResult::pass(format!("dnsmasq configured for *.{}", tld))
             } else {
                 CheckResult::fail(
-                    "dnsmasq missing *.test config",
-                    format!("add `address=/.test/127.0.0.1` to {}", config_path),
+                    format!("dnsmasq missing *.{} config", tld),
+                    format!("add `{}` to {}", expected, config_path),
                 )
             }
         }
@@ -214,27 +294,27 @@ pub async fn check_dnsmasq_config() -> CheckResult {
     }
 }
 
-pub async fn check_dns_resolution() -> CheckResult {
-    // Try resolving via dig against localhost DNS
+pub async fn check_dns_resolution(tld: &str) -> CheckResult {
+    let test_host = format!("zapusk-check.{}", tld);
     match Command::new("dig")
-        .args(["+short", "zapusk-check.test", "@127.0.0.1"])
+        .args(["+short", &test_host, "@127.0.0.1"])
         .output()
         .await
     {
         Ok(output) if output.status.success() => {
             let result = String::from_utf8_lossy(&output.stdout);
             if result.trim() == "127.0.0.1" {
-                CheckResult::pass("*.test resolves to 127.0.0.1")
+                CheckResult::pass(format!("*.{} resolves to 127.0.0.1", tld))
             } else {
                 CheckResult::fail(
-                    format!("*.test resolves to {} (expected 127.0.0.1)", result.trim()),
-                    "check dnsmasq config and /etc/resolver/test",
+                    format!("*.{} resolves to {} (expected 127.0.0.1)", tld, result.trim()),
+                    format!("check dnsmasq config and /etc/resolver/{}", tld),
                 )
             }
         }
         _ => CheckResult::fail(
             "DNS resolution check failed",
-            "ensure dnsmasq is running and /etc/resolver/test exists",
+            format!("ensure dnsmasq is running and /etc/resolver/{} exists", tld),
         ),
     }
 }
@@ -256,7 +336,7 @@ pub fn collect_php_versions(config: &Config) -> Vec<String> {
 pub async fn check_php(version: &str) -> Vec<CheckResult> {
     let mut results = vec![];
 
-    let php_path = format!("/opt/homebrew/opt/php@{}/bin/php", version);
+    let php_path = platform::php_install_path(version);
     if Path::new(&php_path).exists() {
         results.push(CheckResult::pass(format!(
             "php@{} found at {}",
@@ -269,11 +349,8 @@ pub async fn check_php(version: &str) -> Vec<CheckResult> {
         ));
     }
 
-    // Check FPM running
-    let fpm_sock = format!(
-        "/opt/homebrew/var/run/php/php{}-fpm.sock",
-        version
-    );
+    // Check FPM socket
+    let fpm_sock = platform::php_fpm_socket_path(version);
     if Path::new(&fpm_sock).exists() {
         results.push(CheckResult::pass(format!("php{}-fpm socket exists", version)));
     } else {
@@ -342,9 +419,96 @@ pub async fn check_project(project: &ProjectConfig) -> CheckResult {
     ))
 }
 
+// --- Conflict checks ---
+
+/// Detect tools that may conflict with zapusk's dnsmasq + Caddy stack.
+/// These are warnings, not hard failures — the tools can coexist if configured carefully.
+async fn check_conflicts(tld: &str) -> Vec<CheckResult> {
+    let mut results = vec![];
+
+    // Tools that manage local domains or web servers
+    let tools: &[(&str, String)] = &[
+        ("ddev", format!("ddev manages its own DNS and router — .{} domains may conflict", tld)),
+        ("herd", format!("Laravel Herd manages its own DNS and nginx — port 80/443 and .{} domains may conflict", tld)),
+        ("valet", format!("Laravel Valet manages its own dnsmasq and nginx — port 80/443 and .{} domains may conflict", tld)),
+    ];
+
+    for (binary, message) in tools {
+        if Command::new("which").arg(binary).output().await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            results.push(CheckResult::warn(
+                format!("{} detected", binary),
+                message.clone(),
+            ));
+        }
+    }
+
+    // Check if something else is already listening on port 80 (Caddy needs it)
+    if std::net::TcpListener::bind(("127.0.0.1", 80)).is_err() {
+        match find_listening_process(80).await {
+            Some((_pid, cmd)) if cmd.to_lowercase().contains("caddy") => {}
+            Some((pid, cmd)) => {
+                results.push(CheckResult::warn(
+                    format!("port 80 is already in use by {} (pid {})", cmd, pid),
+                    "stop that process or reconfigure it before using zapusk",
+                ));
+            }
+            None => {
+                results.push(CheckResult::warn(
+                    "port 80 is already in use",
+                    "another web server may be listening — Caddy needs port 80",
+                ));
+            }
+        }
+    }
+
+    results
+}
+
+async fn find_listening_process(port: u16) -> Option<(u32, String)> {
+    let output = Command::new("lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP:{}", port),
+            "-sTCP:LISTEN",
+            "-Fpc",
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut pid: Option<u32> = None;
+    let mut cmd: Option<String> = None;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            if pid.is_none() {
+                pid = rest.trim().parse::<u32>().ok();
+            }
+        } else if let Some(rest) = line.strip_prefix('c') {
+            if cmd.is_none() && !rest.trim().is_empty() {
+                cmd = Some(rest.trim().to_string());
+            }
+        }
+
+        if pid.is_some() && cmd.is_some() {
+            break;
+        }
+    }
+
+    Some((pid?, cmd?))
+}
+
 // --- Caddy config checks ---
 
-pub async fn check_caddy_config(caddy: &crate::config::CaddyConfig) -> Vec<CheckResult> {
+pub async fn check_caddy_config(caddy: &crate::core::config::CaddyConfig) -> Vec<CheckResult> {
     let mut results = vec![];
 
     let path = Path::new(&caddy.config_path);

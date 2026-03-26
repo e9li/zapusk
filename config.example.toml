@@ -1,12 +1,15 @@
 # zapusk config
 # Place at ~/.config/zapusk/config.toml
 
+# tld = "test"  # optional, defaults to "test" — used by init/doctor/add for DNS setup
+
 [[projects]]
 name = "myshop"
 domain = "myshop.test"
 port = 4000
 type = "phoenix"
 path = "/home/user/projects/myshop"
+tls = true
 
 [[projects]]
 name = "company-site"
@@ -33,3 +36,7 @@ path = "/home/user/projects/api"
 [caddy]
 config_path = "/home/user/.config/zapusk/Caddyfile"
 # caddy_bin = "caddy"  # optional, defaults to "caddy" in PATH
+
+# Optional custom command override:
+# command = "pnpm"
+# args = ["dev", "--port", "5173"]
