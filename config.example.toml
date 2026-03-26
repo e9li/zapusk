@@ -32,10 +32,20 @@ domain = "api.test"
 port = 3000
 type = "axum"
 path = "/home/user/projects/api"
+upstream_host = "127.0.0.1" # optional reverse proxy target host
 
 [caddy]
 config_path = "/home/user/.config/zapusk/Caddyfile"
 # caddy_bin = "caddy"  # optional, defaults to "caddy" in PATH
+
+# Optional: configure what counts as web-ish ports for `u` -> `w` filter
+[discovery]
+web_ports = ["80", "443", "8080", "8443", "3000-9999"]
+
+# Optional: hide noisy background listeners from discovery
+# [[ignored_services]]
+# port = 3306
+# command = "mariadbd"
 
 # Optional custom command override:
 # command = "pnpm"
