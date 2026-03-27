@@ -24,10 +24,10 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
 /// Open a URL in the default browser.
 pub fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(url).spawn()?;
+    std::process::Command::new("open").arg(url).spawn()?.wait()?;
 
     #[cfg(not(target_os = "macos"))]
-    std::process::Command::new("xdg-open").arg(url).spawn()?;
+    std::process::Command::new("xdg-open").arg(url).spawn()?.wait()?;
 
     Ok(())
 }

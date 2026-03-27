@@ -405,6 +405,7 @@ impl App {
         let (tx, rx) = mpsc::channel(256);
 
         let projects = config.projects.iter().cloned().map(Project::new).collect();
+        crate::tui::ui::init_theme(config.theme.as_ref());
 
         Self {
             projects,
@@ -827,7 +828,9 @@ impl App {
     async fn remove_project(&mut self, name: &str) {
         // Remove from runtime
         self.projects.retain(|p| p.config.name != name);
-        if self.selected >= self.projects.len() && !self.projects.is_empty() {
+        if self.projects.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.projects.len() {
             self.selected = self.projects.len() - 1;
         }
 
@@ -852,9 +855,13 @@ impl App {
             .parse::<ProjectType>()
             .unwrap_or(ProjectType::Phoenix);
         let port = match form.port.parse::<u16>() {
+            Ok(0) => {
+                self.status_message = Some("Port must be between 1 and 65535".into());
+                return;
+            }
             Ok(p) => p,
             Err(_) => {
-                self.status_message = Some(format!("Invalid port: {}", form.port));
+                self.status_message = Some(format!("Invalid port '{}': must be a number 1-65535", form.port));
                 return;
             }
         };
@@ -888,12 +895,6 @@ impl App {
         if self.projects.iter().any(|p| p.config.port == port) {
             self.status_message = Some(format!("Port {} is already used by another project", port));
             return;
-        }
-        if let Some(host) = parse_upstream_host(&form.upstream_host) {
-            if !is_valid_upstream_host(&host) {
-                self.status_message = Some(format!("Invalid upstream host: {}", host));
-                return;
-            }
         }
 
         let config = ProjectConfig {
@@ -996,9 +997,13 @@ impl App {
             .parse::<ProjectType>()
             .unwrap_or(ProjectType::Phoenix);
         let port = match form.port.parse::<u16>() {
+            Ok(0) => {
+                self.status_message = Some("Port must be between 1 and 65535".into());
+                return;
+            }
             Ok(p) => p,
             Err(_) => {
-                self.status_message = Some(format!("Invalid port: {}", form.port));
+                self.status_message = Some(format!("Invalid port '{}': must be a number 1-65535", form.port));
                 return;
             }
         };
@@ -1153,8 +1158,10 @@ impl App {
             .cloned()
             .collect();
 
-        if self.unmanaged_selected >= self.unmanaged_services.len() {
-            self.unmanaged_selected = self.unmanaged_services.len().saturating_sub(1);
+        if self.unmanaged_services.is_empty() {
+            self.unmanaged_selected = 0;
+        } else if self.unmanaged_selected >= self.unmanaged_services.len() {
+            self.unmanaged_selected = self.unmanaged_services.len() - 1;
         }
     }
 
@@ -1331,14 +1338,13 @@ impl App {
             return base.to_string();
         }
 
-        let mut i = 2;
-        loop {
+        for i in 2..=1000 {
             let candidate = format!("{}-{}", base, i);
             if !self.projects.iter().any(|p| p.config.name == candidate) {
                 return candidate;
             }
-            i += 1;
         }
+        format!("{}-{}", base, chrono::Local::now().timestamp())
     }
 
     fn unique_domain_for_name(&self, name: &str) -> String {
@@ -1348,17 +1354,17 @@ impl App {
             return domain;
         }
 
-        let mut i = 2;
-        loop {
+        for i in 2..=1000 {
             domain = format!("{}-{}.{}", base, i, self.config.tld);
             if !self.projects.iter().any(|p| p.config.domain == domain) {
                 return domain;
             }
-            i += 1;
         }
+        format!("{}-{}.{}", base, chrono::Local::now().timestamp(), self.config.tld)
     }
 
-    /// Rewrite config.toml from current state
+    /// Rewrite config.toml from current state.
+    /// Uses atomic write (temp file + rename) to prevent corruption on interruption.
     fn save_config(&self) -> Result<()> {
         let path = config_path();
         let serialized = Config {
@@ -1367,10 +1373,15 @@ impl App {
             caddy: self.config.caddy.clone(),
             discovery: self.config.discovery.clone(),
             ignored_services: self.config.ignored_services.clone(),
+            theme: self.config.theme.clone(),
         };
         let mut out = String::from("# zapusk config\n\n");
         out.push_str(&toml::to_string_pretty(&serialized)?);
-        std::fs::write(&path, &out)?;
+
+        // Write to a temp file in the same directory, then rename for atomicity
+        let tmp_path = path.with_extension("toml.tmp");
+        std::fs::write(&tmp_path, &out)?;
+        std::fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 

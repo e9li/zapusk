@@ -220,9 +220,15 @@ impl App {
             KeyCode::Char('q') => self.quit().await,
             KeyCode::Char('Q') => self.force_quit().await,
 
-            // Navigation
-            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
-            KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
+            // Navigation — pane-aware
+            KeyCode::Down | KeyCode::Char('j') => match self.active_pane {
+                super::app::ActivePane::ProjectList => self.select_next(),
+                super::app::ActivePane::Logs => self.scroll_logs_down(1),
+            },
+            KeyCode::Up | KeyCode::Char('k') => match self.active_pane {
+                super::app::ActivePane::ProjectList => self.select_prev(),
+                super::app::ActivePane::Logs => self.scroll_logs_up(1),
+            },
 
             // Switch panes
             KeyCode::Tab => self.toggle_pane(),
@@ -288,16 +294,20 @@ impl App {
     fn copy_domain(&mut self) {
         if let Some(project) = self.selected_project() {
             let domain = project.config.domain.clone();
-            let _ = platform::copy_to_clipboard(&domain);
-            self.status_message = Some(format!("Copied {}", domain));
+            match platform::copy_to_clipboard(&domain) {
+                Ok(()) => self.status_message = Some(format!("Copied {}", domain)),
+                Err(e) => self.status_message = Some(format!("Clipboard error: {}", e)),
+            }
         }
     }
 
-    fn open_in_browser(&self) {
+    fn open_in_browser(&mut self) {
         if let Some(project) = self.selected_project() {
             let scheme = if project.config.tls { "https" } else { "http" };
             let url = format!("{}://{}", scheme, project.config.domain);
-            let _ = platform::open_url(&url);
+            if let Err(e) = platform::open_url(&url) {
+                self.status_message = Some(format!("Could not open browser: {}", e));
+            }
         }
     }
 }

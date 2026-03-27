@@ -139,6 +139,7 @@ async fn step_dnsmasq_config(tld: &str) -> Result<()> {
 async fn ensure_macos_resolver(resolver_file: &str) -> Result<()> {
     let resolver_path = Path::new(resolver_file);
     let expected = "nameserver 127.0.0.1";
+    let content_to_write = "\n# Added by zapusk\nnameserver 127.0.0.1\n";
 
     if resolver_path.exists() {
         match std::fs::read_to_string(resolver_path) {
@@ -152,18 +153,25 @@ async fn ensure_macos_resolver(resolver_file: &str) -> Result<()> {
                     resolver_file, expected
                 );
                 if prompt_yn("      Append nameserver entry to existing file? (requires sudo)") {
-                    let cmd = format!(
-                        "grep -q '^nameserver 127.0.0.1$' {file} || printf '\n# Added by zapusk\nnameserver 127.0.0.1\n' >> {file}",
-                        file = resolver_file
-                    );
                     let status = Command::new("sudo")
-                        .args(["bash", "-c", &cmd])
-                        .status()
-                        .await?;
-                    if status.success() {
-                        println!("      \u{2713} Updated existing resolver file");
-                    } else {
-                        println!("      \u{2717} Failed to update resolver file");
+                        .args(["tee", "-a", resolver_file])
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .spawn();
+                    match status {
+                        Ok(mut child) => {
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                use tokio::io::AsyncWriteExt;
+                                let _ = stdin.write_all(content_to_write.as_bytes()).await;
+                            }
+                            let result = child.wait().await?;
+                            if result.success() {
+                                println!("      \u{2713} Updated existing resolver file");
+                            } else {
+                                println!("      \u{2717} Failed to update resolver file");
+                            }
+                        }
+                        Err(e) => println!("      \u{2717} Failed to run sudo: {}", e),
                     }
                 }
                 return Ok(());
@@ -176,18 +184,25 @@ async fn ensure_macos_resolver(resolver_file: &str) -> Result<()> {
                 if prompt_yn(
                     "      Ensure nameserver entry with sudo? (will keep existing content)",
                 ) {
-                    let cmd = format!(
-                        "grep -q '^nameserver 127.0.0.1$' {file} || printf '\n# Added by zapusk\nnameserver 127.0.0.1\n' >> {file}",
-                        file = resolver_file
-                    );
                     let status = Command::new("sudo")
-                        .args(["bash", "-c", &cmd])
-                        .status()
-                        .await?;
-                    if status.success() {
-                        println!("      \u{2713} Resolver file ensured");
-                    } else {
-                        println!("      \u{2717} Failed to ensure resolver file");
+                        .args(["tee", "-a", resolver_file])
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .spawn();
+                    match status {
+                        Ok(mut child) => {
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                use tokio::io::AsyncWriteExt;
+                                let _ = stdin.write_all(content_to_write.as_bytes()).await;
+                            }
+                            let result = child.wait().await?;
+                            if result.success() {
+                                println!("      \u{2713} Resolver file ensured");
+                            } else {
+                                println!("      \u{2717} Failed to ensure resolver file");
+                            }
+                        }
+                        Err(e) => println!("      \u{2717} Failed to run sudo: {}", e),
                     }
                 }
                 return Ok(());
@@ -196,18 +211,31 @@ async fn ensure_macos_resolver(resolver_file: &str) -> Result<()> {
     }
 
     if prompt_yn(&format!("      Create {}? (requires sudo)", resolver_file)) {
-        let cmd = format!(
-            "mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\\n' > {}",
-            resolver_file
-        );
-        let status = Command::new("sudo")
-            .args(["bash", "-c", &cmd])
+        // Ensure /etc/resolver exists
+        let _ = Command::new("sudo")
+            .args(["mkdir", "-p", "/etc/resolver"])
             .status()
-            .await?;
-        if status.success() {
-            println!("      \u{2713} {} created", resolver_file);
-        } else {
-            println!("      \u{2717} Failed — create it manually");
+            .await;
+
+        let status = Command::new("sudo")
+            .args(["tee", resolver_file])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn();
+        match status {
+            Ok(mut child) => {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(b"nameserver 127.0.0.1\n").await;
+                }
+                let result = child.wait().await?;
+                if result.success() {
+                    println!("      \u{2713} {} created", resolver_file);
+                } else {
+                    println!("      \u{2717} Failed — create it manually");
+                }
+            }
+            Err(e) => println!("      \u{2717} Failed to run sudo: {}", e),
         }
     }
 
@@ -393,19 +421,23 @@ async fn is_tool_actively_conflicting(binary: &str) -> bool {
 
 fn prompt_tld() -> String {
     let default = Config::tld_or_default();
-    print!("Which TLD do you want for local domains? [{}] ", default);
-    if io::stdout().flush().is_err() {
-        return default;
-    }
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return default;
-    }
-    let input = input.trim().trim_start_matches('.');
-    if input.is_empty() {
-        default
-    } else {
-        input.to_string()
+    loop {
+        print!("Which TLD do you want for local domains? [{}] ", default);
+        if io::stdout().flush().is_err() {
+            return default;
+        }
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            return default;
+        }
+        let input = input.trim().trim_start_matches('.');
+        if input.is_empty() {
+            return default;
+        }
+        if crate::core::config::is_valid_tld(input) {
+            return input.to_string();
+        }
+        println!("Invalid TLD: must be alphanumeric and hyphens only (e.g. 'test', 'local')");
     }
 }
 

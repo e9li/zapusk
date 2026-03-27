@@ -193,6 +193,7 @@ fn default_config() -> Config {
         }),
         discovery: None,
         ignored_services: vec![],
+        theme: None,
     }
 }
 

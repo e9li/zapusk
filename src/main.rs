@@ -60,9 +60,9 @@ async fn main() -> Result<()> {
 async fn run_tui() -> Result<()> {
     let config = match Config::load() {
         Ok(cfg) => cfg,
-        Err(_) => {
+        Err(e) => {
             let path = core::config::config_path();
-            eprintln!("No config found at {}\n", path.display());
+            eprintln!("Could not load config at {}: {}\n", path.display(), e);
             eprintln!("Get started:");
             eprintln!("  zapusk init          Set up dnsmasq + Caddy");
             eprintln!("  zapusk add           Add your first project");

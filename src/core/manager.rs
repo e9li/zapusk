@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::net::TcpListener;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::path::PathBuf;
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -120,15 +121,30 @@ impl Manager {
             cmd.env(key, val);
         }
 
+        // Redirect stdout/stderr to log files so the child process is not killed
+        // by SIGPIPE when zapusk exits with `q` (soft quit).
+        std::fs::create_dir_all(log_dir())?;
+        let stdout_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(log_path(&config.name))?;
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(err_log_path(&config.name))?;
+
         let mut child = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::from(stdout_file))
+            .stderr(std::process::Stdio::from(stderr_file))
+            .process_group(0)
             .spawn()?;
 
-        let pid = child.id().unwrap_or(0);
-        if pid == 0 {
-            bail!("Could not determine PID for {}", config.name);
-        }
+        let pid = match child.id() {
+            Some(id) => id,
+            None => bail!("Could not determine PID for {}", config.name),
+        };
         let name = config.name.clone();
         let tx = self.event_tx.clone();
 
@@ -141,41 +157,11 @@ impl Manager {
             })
             .await;
 
-        // Spawn a task to stream stdout
-        if let Some(stdout) = child.stdout.take() {
-            let tx_out = tx.clone();
-            let name_out = name.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = tx_out
-                        .send(ManagerEvent::LogLine {
-                            project_name: name_out.clone(),
-                            line,
-                            is_stderr: false,
-                        })
-                        .await;
-                }
-            });
-        }
+        write_pid(&config.name, pid);
 
-        // Spawn a task to stream stderr
-        if let Some(stderr) = child.stderr.take() {
-            let tx_err = tx.clone();
-            let name_err = name.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = tx_err
-                        .send(ManagerEvent::LogLine {
-                            project_name: name_err.clone(),
-                            line,
-                            is_stderr: true,
-                        })
-                        .await;
-                }
-            });
-        }
+        // Tail stdout and stderr log files for live log streaming
+        spawn_log_tail(log_path(&name), name.clone(), false, tx.clone());
+        spawn_log_tail(err_log_path(&name), name.clone(), true, tx.clone());
 
         // Spawn a wait task for process exit detection.
         let tx_exit = tx.clone();
@@ -232,9 +218,10 @@ impl Manager {
     pub async fn stop(&mut self, name: &str) -> Result<()> {
         if let Some(pid) = self.spawned.remove(name) {
             send_sigterm(pid)?;
+            remove_pid(name);
         } else if let Some(pid) = self.adopted.remove(name) {
-            // Send SIGTERM to adopted process
             send_sigterm(pid)?;
+            remove_pid(name);
         } else {
             bail!("Project {} is not running", name);
         }
@@ -242,8 +229,56 @@ impl Manager {
     }
 
     /// Check if a project's port is already in use and adopt the process if so.
+    /// Checks pidfiles first (previously managed by zapusk), then falls back to lsof.
     /// Returns Some(pid) if adopted, None if port is free.
     pub async fn detect_running(&mut self, config: &ProjectConfig) -> Option<u32> {
+        // Check pidfile first — process was previously managed by zapusk
+        if let Some(pid) = read_pid(&config.name) {
+            if process_exists(pid) {
+                self.adopted.insert(config.name.clone(), pid);
+                let _ = self
+                    .event_tx
+                    .send(ManagerEvent::ProcessStarted {
+                        project_name: config.name.clone(),
+                        pid,
+                        adopted: true,
+                    })
+                    .await;
+                // Replay recent log history from files
+                send_log_history(
+                    log_path(&config.name),
+                    config.name.clone(),
+                    false,
+                    &self.event_tx,
+                )
+                .await;
+                send_log_history(
+                    err_log_path(&config.name),
+                    config.name.clone(),
+                    true,
+                    &self.event_tx,
+                )
+                .await;
+                // Continue live tailing
+                spawn_log_tail(
+                    log_path(&config.name),
+                    config.name.clone(),
+                    false,
+                    self.event_tx.clone(),
+                );
+                spawn_log_tail(
+                    err_log_path(&config.name),
+                    config.name.clone(),
+                    true,
+                    self.event_tx.clone(),
+                );
+                return Some(pid);
+            } else {
+                remove_pid(&config.name); // stale pidfile
+            }
+        }
+
+        // Fall back to port-based detection (external processes — no log files)
         if TcpListener::bind(("127.0.0.1", config.port)).is_ok() {
             return None; // Port is free, project is not running
         }
@@ -270,11 +305,13 @@ impl Manager {
     }
 
     pub async fn stop_all(&mut self) {
-        for (_, pid) in self.spawned.drain() {
+        for (name, pid) in self.spawned.drain() {
             let _ = send_sigterm(pid);
+            remove_pid(&name);
         }
-        for (_, pid) in self.adopted.drain() {
+        for (name, pid) in self.adopted.drain() {
             let _ = send_sigterm(pid);
+            remove_pid(&name);
         }
     }
 }
@@ -310,4 +347,117 @@ async fn find_port_pid(port: u16) -> Option<u32> {
 
     let pids = String::from_utf8_lossy(&output.stdout);
     pids.trim().lines().next()?.trim().parse().ok()
+}
+
+// ── Log / PID file helpers ──────────────────────────────────────────────────
+
+fn log_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/zapusk/logs")
+}
+
+fn pid_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/zapusk/pids")
+}
+
+fn log_path(name: &str) -> PathBuf {
+    log_dir().join(format!("{}.out", name))
+}
+
+fn err_log_path(name: &str) -> PathBuf {
+    log_dir().join(format!("{}.err", name))
+}
+
+fn pid_path(name: &str) -> PathBuf {
+    pid_dir().join(format!("{}.pid", name))
+}
+
+fn write_pid(name: &str, pid: u32) {
+    let _ = std::fs::create_dir_all(pid_dir());
+    let _ = std::fs::write(pid_path(name), pid.to_string());
+}
+
+fn remove_pid(name: &str) {
+    let _ = std::fs::remove_file(pid_path(name));
+}
+
+fn read_pid(name: &str) -> Option<u32> {
+    std::fs::read_to_string(pid_path(name))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Spawn a background task that tails a log file and forwards lines as ManagerEvents.
+/// Polls for new content every 100ms after reaching EOF (tail -f style).
+fn spawn_log_tail(
+    path: PathBuf,
+    project_name: String,
+    is_stderr: bool,
+    tx: mpsc::Sender<ManagerEvent>,
+) {
+    tokio::spawn(async move {
+        // Brief delay to let the process write the first bytes
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    // EOF — wait and poll for more content
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Ok(_) => {
+                    let l = line
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .to_string();
+                    if !l.is_empty() {
+                        let _ = tx
+                            .send(ManagerEvent::LogLine {
+                                project_name: project_name.clone(),
+                                line: l,
+                                is_stderr,
+                            })
+                            .await;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Read the last ~50 lines from a log file and send them as LogLine events.
+/// Used when re-adopting a previously-managed process on zapusk restart.
+async fn send_log_history(
+    path: PathBuf,
+    project_name: String,
+    is_stderr: bool,
+    tx: &mpsc::Sender<ManagerEvent>,
+) {
+    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(50);
+        for line in &lines[start..] {
+            if !line.is_empty() {
+                let _ = tx
+                    .send(ManagerEvent::LogLine {
+                        project_name: project_name.clone(),
+                        line: line.to_string(),
+                        is_stderr,
+                    })
+                    .await;
+            }
+        }
+    }
 }
