@@ -50,3 +50,17 @@ web_ports = ["80", "443", "8080", "8443", "3000-9999"]
 # Optional custom command override:
 # command = "pnpm"
 # args = ["dev", "--port", "5173"]
+
+# Optional: override TUI colors. Values are hex strings (#rrggbb) or named
+# terminal colors (red, green, cyan, white, darkgray, lightgreen, …).
+# All fields are optional — omit to keep the default.
+# [theme]
+# border        = "#3c3c50"  # unfocused pane borders
+# border_focus  = "#96c832"  # focused pane border (lime green)
+# text          = "#c8c8d2"  # primary text
+# text_dim      = "#646478"  # timestamps, labels, key hints
+# accent        = "#78b4dc"  # project type, port numbers
+# ok            = "#64c864"  # running status, managed badge
+# warn          = "#dcb43c"  # warnings, adopted badge, stderr lines
+# err           = "#dc5a5a"  # errors, failed status
+# highlight_bg  = "#282837"  # selected-item background
