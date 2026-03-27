@@ -124,15 +124,26 @@ pub async fn write_and_reload(
     }
 }
 
-/// Format the Caddyfile in-place using `caddy fmt`
+/// Format the Caddyfile in-place using `caddy fmt`.
+/// Formatting failures are non-fatal but logged to stderr for debugging.
 async fn fmt(caddy_config: &CaddyConfig) {
     let bin = caddy_config.caddy_bin.as_deref().unwrap_or("caddy");
-    let _ = Command::new(bin)
+    match Command::new(bin)
         .args(["fmt", "--overwrite", &caddy_config.config_path])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
-        .await;
+        .await
+    {
+        Ok(output) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("caddy fmt warning: {}", stderr.trim());
+        }
+        Err(e) => {
+            eprintln!("caddy fmt warning: {}", e);
+        }
+        _ => {}
+    }
 }
 
 /// Check if Caddy's admin API is reachable (i.e. Caddy is running)
@@ -165,15 +176,18 @@ async fn start_caddy_run(caddy_config: &CaddyConfig) -> Result<()> {
     let bin = caddy_config.caddy_bin.as_deref().unwrap_or("caddy");
 
     // Spawn `caddy run` with all stdio suppressed.
-    // The process runs in the background; we don't track the handle —
-    // it will be cleaned up when zapusk exits or via `caddy stop`.
-    let _child = Command::new(bin)
+    // A background task reaps the child to prevent zombie processes.
+    let child = Command::new(bin)
         .args(["run", "--config", &caddy_config.config_path])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("Failed to spawn caddy run")?;
+
+    tokio::spawn(async move {
+        let _ = child.wait_with_output().await;
+    });
 
     // Give Caddy a moment to start its admin API
     for _ in 0..20 {

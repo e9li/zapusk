@@ -19,6 +19,24 @@ pub struct Config {
     pub discovery: Option<DiscoveryConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_services: Vec<IgnoredService>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeConfig>,
+}
+
+/// Optional color overrides for the TUI.
+/// Each field accepts a hex color string like "#64b4dc" or a named color
+/// like "red", "green", "cyan", "white", "darkgray", "lightgreen", etc.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ThemeConfig {
+    pub border: Option<String>,
+    pub border_focus: Option<String>,
+    pub text: Option<String>,
+    pub text_dim: Option<String>,
+    pub accent: Option<String>,
+    pub ok: Option<String>,
+    pub warn: Option<String>,
+    pub err: Option<String>,
+    pub highlight_bg: Option<String>,
 }
 
 fn default_tld() -> String {
@@ -193,6 +211,17 @@ impl Config {
             .map(|c| c.tld)
             .unwrap_or_else(|_| default_tld())
     }
+}
+
+/// Validate that a TLD contains only safe characters (alphanumeric and hyphens).
+pub fn is_valid_tld(tld: &str) -> bool {
+    !tld.is_empty()
+        && tld.len() <= 63
+        && tld
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !tld.starts_with('-')
+        && !tld.ends_with('-')
 }
 
 pub fn config_path() -> PathBuf {

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 
-use crate::core::config::{config_path, Config, ProjectType};
+use crate::core::config::{config_path, Config, ProjectConfig, ProjectType};
 
 pub async fn run() -> Result<()> {
     println!("Add a new project to zapusk config\n");
@@ -11,7 +11,10 @@ pub async fn run() -> Result<()> {
     let slug = crate::core::slugify(&name);
     let default_domain = format!("{}.{}", slug, tld);
     let domain = prompt_with_default("Domain", &default_domain)?;
-    let port: u16 = prompt("Port")?.parse().context("Port must be a number")?;
+    let port: u16 = prompt("Port")?.parse().context("Port must be a number 1-65535")?;
+    if port == 0 {
+        anyhow::bail!("Port must be between 1 and 65535");
+    }
     let project_type: ProjectType =
         prompt_with_default("Type (phoenix/symfony/kirby/axum)", "phoenix")?
             .parse()
@@ -22,11 +25,10 @@ pub async fn run() -> Result<()> {
         anyhow::bail!("Directory not found: {}", path);
     }
 
-    let php_version_line = if project_type == ProjectType::Kirby {
-        let v = prompt_with_default("PHP version", "8.3")?;
-        format!("\nphp_version = \"{}\"", v)
+    let php_version = if project_type == ProjectType::Kirby {
+        Some(prompt_with_default("PHP version", "8.3")?)
     } else {
-        String::new()
+        None
     };
 
     // Check for duplicates in existing config
@@ -39,19 +41,20 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    let block = format!(
-        r#"
-
-[[projects]]
-name = "{name}"
-domain = "{domain}"
-port = {port}
-type = "{project_type}"
-path = "{path}"{php_version_line}
-{tls_line}
-"#,
-        tls_line = if tls { "tls = true" } else { "" }
-    );
+    let new_project = ProjectConfig {
+        name: name.clone(),
+        domain,
+        port,
+        project_type,
+        path,
+        php_version,
+        command: None,
+        upstream_host: None,
+        args: vec![],
+        env: Default::default(),
+        autostart: false,
+        tls,
+    };
 
     let config_file = config_path();
     if !config_file.exists() {
@@ -80,6 +83,11 @@ path = "{path}"{php_version_line}
         std::fs::write(&config_file, initial)?;
         println!("Created {}", config_file.display());
     }
+
+    // Serialize using TOML library to safely handle special characters in user input
+    let project_toml = toml::to_string_pretty(&new_project)
+        .context("Failed to serialize project config")?;
+    let block = format!("\n\n[[projects]]\n{}", project_toml);
 
     let mut file = std::fs::OpenOptions::new()
         .append(true)
