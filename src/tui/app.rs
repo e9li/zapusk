@@ -642,7 +642,9 @@ impl App {
             // Ensure Caddy is running with current config before starting the project
             self.append_system_log(&name, "step 1/3: ensuring Caddy config", false);
             self.status_message = Some(format!("{}: step 1/3 ensuring Caddy config...", name));
-            self.ensure_caddy().await;
+            if let Some(caddy_err) = self.ensure_caddy().await {
+                self.append_system_log(&name, caddy_err, true);
+            }
 
             match self.manager.start(&config).await {
                 Ok(status) => {
@@ -683,6 +685,7 @@ impl App {
                     }
                 }
                 Err(e) => {
+                    self.append_system_log(&name, format!("start failed: {}", e), true);
                     self.status_message = Some(format!("Error: {}", e));
                 }
             }
@@ -691,13 +694,17 @@ impl App {
 
     /// Ensure Caddy is running with the current Caddyfile.
     /// Writes the Caddyfile and starts/reloads Caddy silently.
-    async fn ensure_caddy(&mut self) {
+    /// Returns the error message if Caddy reload failed, so callers can log it.
+    async fn ensure_caddy(&mut self) -> Option<String> {
         if let Some(caddy_cfg) = &self.config.caddy.clone() {
             let projects: Vec<_> = self.projects.iter().map(|p| p.config.clone()).collect();
             if let Err(e) = caddy::write_and_reload(&projects, caddy_cfg).await {
-                self.status_message = Some(format!("Caddy warning: {}", e));
+                let msg = format!("Caddy warning: {}", e);
+                self.status_message = Some(msg.clone());
+                return Some(msg);
             }
         }
+        None
     }
 
     pub(crate) async fn stop_project(&mut self, name: &str) {
@@ -904,6 +911,7 @@ impl App {
             project_type,
             path: form.path,
             php_version: None,
+            public_dir: None,
             command: None,
             upstream_host: parse_upstream_host(&form.upstream_host),
             args: vec![],
@@ -1052,6 +1060,7 @@ impl App {
             } else {
                 None
             },
+            public_dir: existing.public_dir,
             command: existing.command,
             upstream_host: parse_upstream_host(&form.upstream_host),
             args: existing.args,
@@ -1262,6 +1271,7 @@ impl App {
             project_type,
             path: service.cwd.clone().unwrap_or_default(),
             php_version,
+            public_dir: None,
             command,
             upstream_host: None,
             args,

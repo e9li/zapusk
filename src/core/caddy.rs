@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 
-use crate::core::config::{CaddyConfig, ProjectConfig, ProjectType};
-use crate::platform;
+use crate::core::config::{CaddyConfig, ProjectConfig};
 
 /// Generate a Caddyfile from all project configs.
 /// If `project.tls = true`, the site uses `https://...` with `tls internal`.
@@ -21,11 +20,6 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
         log_path.display()
     ));
 
-    let fpm_template = caddy_config
-        .fpm_socket_template
-        .as_deref()
-        .unwrap_or_else(|| platform::default_fpm_socket_template());
-
     for project in projects {
         let domain = if project.tls {
             format!("https://{}", project.domain)
@@ -40,13 +34,6 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
         }
 
         match project.project_type {
-            ProjectType::Kirby => {
-                let php_version = project.php_version.as_deref().unwrap_or("8.3");
-                let fpm_sock = fpm_template.replace("{version}", php_version);
-                directives.push(format!("root * {}/public", project.path));
-                directives.push(format!("php_fastcgi unix/{}", fpm_sock));
-                directives.push("file_server".to_string());
-            }
             _ => {
                 if let Some(host) = project
                     .upstream_host
