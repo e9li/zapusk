@@ -122,6 +122,7 @@ fn import_service(target: &str, services: &[ServiceInfo], config: &mut Config) -
         project_type,
         path: cwd.clone(),
         php_version,
+        public_dir: None,
         command,
         upstream_host: None,
         args,

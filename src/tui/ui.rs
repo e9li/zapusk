@@ -546,12 +546,33 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
     let inner_height = area.height.saturating_sub(2 + search_height) as usize;
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let ts_width = 9usize; // "HH:MM:SS "
 
-    let total = logs.len();
-    let end = total.saturating_sub(app.log_scroll_offset);
-    let start = end.saturating_sub(inner_height);
+    // Approximate visual rows each log entry occupies after wrapping
+    let visual_rows_of = |char_count: usize| -> usize {
+        let w = ts_width + char_count;
+        (w + inner_width.saturating_sub(1)) / inner_width.max(1)
+    };
 
-    let mut text: Vec<Line> = logs[start..end]
+    let total_visual: usize = logs
+        .iter()
+        .map(|e| visual_rows_of(e.line.chars().count()))
+        .sum();
+
+    let offset_visual: usize = logs
+        .iter()
+        .rev()
+        .take(app.log_scroll_offset)
+        .map(|e| visual_rows_of(e.line.chars().count()))
+        .sum();
+
+    // Anchor the bottom of the content to the bottom of the pane, adjusted by scroll
+    let scroll_row = total_visual
+        .saturating_sub(inner_height)
+        .saturating_sub(offset_visual) as u16;
+
+    let mut text: Vec<Line> = logs
         .iter()
         .map(|entry| {
             let color = log_color(&entry.line, entry.is_stderr);
@@ -582,7 +603,10 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    let paragraph = Paragraph::new(text).block(block);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_row, 0));
     frame.render_widget(paragraph, area);
 }
 

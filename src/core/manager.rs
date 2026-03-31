@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -87,9 +87,9 @@ impl Manager {
             );
         }
 
-        let (bin, args) = if let Some(ref cmd_override) = config.command {
+        let (bin, args, notes) = if let Some(ref cmd_override) = config.command {
             if !config.args.is_empty() {
-                (cmd_override.clone(), config.args.clone())
+                (cmd_override.clone(), config.args.clone(), vec![])
             } else {
                 let parts = shell_words::split(cmd_override).map_err(|e| {
                     anyhow::anyhow!("Invalid command override for {}: {}", config.name, e)
@@ -99,7 +99,7 @@ impl Manager {
                 }
                 let bin = parts[0].to_string();
                 let args = parts[1..].to_vec();
-                (bin, args)
+                (bin, args, vec![])
             }
         } else {
             if !config.args.is_empty() {
@@ -123,23 +123,67 @@ impl Manager {
 
         // Redirect stdout/stderr to log files so the child process is not killed
         // by SIGPIPE when zapusk exits with `q` (soft quit).
-        std::fs::create_dir_all(log_dir())?;
+        let log_dir = log_dir();
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("Could not create log directory {:?}", log_dir))?;
+        let stdout_path = log_path(&config.name);
         let stdout_file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
-            .open(log_path(&config.name))?;
+            .open(&stdout_path)
+            .with_context(|| format!("Could not open log file {:?}", stdout_path))?;
+        let stderr_path = err_log_path(&config.name);
         let stderr_file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
-            .open(err_log_path(&config.name))?;
+            .open(&stderr_path)
+            .with_context(|| format!("Could not open log file {:?}", stderr_path))?;
 
-        let mut child = cmd
+        // Log diagnostic notes (e.g. PHP fallback warnings) before attempting spawn
+        for note in &notes {
+            let _ = self
+                .event_tx
+                .send(ManagerEvent::LogLine {
+                    project_name: config.name.clone(),
+                    line: format!("[zapusk] {}", note),
+                    is_stderr: true,
+                })
+                .await;
+        }
+
+        // Log the exact command that will be run
+        let _ = self
+            .event_tx
+            .send(ManagerEvent::LogLine {
+                project_name: config.name.clone(),
+                line: format!("[zapusk] command: {} {}", bin, args.join(" ")),
+                is_stderr: false,
+            })
+            .await;
+
+        let spawn_result = cmd
             .stdout(std::process::Stdio::from(stdout_file))
             .stderr(std::process::Stdio::from(stderr_file))
             .process_group(0)
-            .spawn()?;
+            .spawn()
+            .with_context(|| format!("could not run '{}': not found or not executable", bin));
+
+        let mut child = match spawn_result {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = self
+                    .event_tx
+                    .send(ManagerEvent::LogLine {
+                        project_name: config.name.clone(),
+                        line: format!("[zapusk] start failed: {}", e),
+                        is_stderr: true,
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
 
         let pid = match child.id() {
             Some(id) => id,

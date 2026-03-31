@@ -53,6 +53,9 @@ pub struct ProjectConfig {
     pub path: String,
     /// Only relevant for Kirby projects
     pub php_version: Option<String>,
+    /// Document root subfolder for Kirby projects (default: "public")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_dir: Option<String>,
     /// Custom command override (bypasses built-in start_command)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -97,11 +100,12 @@ impl ProjectType {
         }
     }
 
-    /// Returns the command to start this project type.
+    /// Returns `(binary, args, notes)` to start this project type.
+    /// Notes are diagnostic strings to be logged before the process starts.
     /// The command is run from the project's `path`.
-    pub fn start_command(&self, config: &ProjectConfig) -> (String, Vec<String>) {
+    pub fn start_command(&self, config: &ProjectConfig) -> (String, Vec<String>, Vec<String>) {
         match self {
-            ProjectType::Phoenix => ("mix".into(), vec!["phx.server".into()]),
+            ProjectType::Phoenix => ("mix".into(), vec!["phx.server".into()], vec![]),
             ProjectType::Symfony => {
                 let mut args = vec![
                     "server:start".into(),
@@ -109,30 +113,35 @@ impl ProjectType {
                     "--port".into(),
                     config.port.to_string(),
                 ];
+                let mut notes = vec![];
                 // Read .php-version from project dir if present
                 let php_version_path = std::path::Path::new(&config.path).join(".php-version");
                 if let Ok(version) = std::fs::read_to_string(&php_version_path) {
                     let version = version.trim().to_string();
                     if !version.is_empty() {
                         args.push("--php-version".into());
-                        args.push(version);
+                        args.push(version.clone());
+                        notes.push(format!("PHP version {} (from .php-version)", version));
                     }
                 }
-                ("symfony".into(), args)
+                ("symfony".into(), args, notes)
             }
             ProjectType::Kirby => {
-                let php_bin = platform::php_binary_path(config.php_version.as_deref());
+                let (php_bin, notes) =
+                    platform::php_binary_resolved(config.php_version.as_deref());
+                let doc_root = config.public_dir.as_deref().unwrap_or("public");
                 (
                     php_bin,
                     vec![
                         "-S".into(),
                         format!("localhost:{}", config.port),
                         "-t".into(),
-                        "public".into(),
+                        doc_root.into(),
                     ],
+                    notes,
                 )
             }
-            ProjectType::Axum => ("cargo".into(), vec!["run".into()]),
+            ProjectType::Axum => ("cargo".into(), vec!["run".into()], vec![]),
         }
     }
 }

@@ -19,7 +19,7 @@ A lightweight terminal UI for managing local development projects. Built with Ru
 | Tool | Role |
 |------|------|
 | **dnsmasq** | Wildcard `*.test` DNS — any `name.test` resolves to localhost automatically |
-| **Caddy** | Reverse proxy — maps `name.test` → `localhost:PORT`, handles PHP-FPM for Kirby |
+| **Caddy** | Reverse proxy — maps `name.test` → `localhost:PORT` for all project types |
 | **zapusk** | TUI — starts/stops project servers, streams logs, regenerates Caddyfile |
 
 ### Supported project types
@@ -28,7 +28,7 @@ A lightweight terminal UI for managing local development projects. Built with Ru
 |------|-------------|
 | **Phoenix** | `mix phx.server` |
 | **Symfony** | `symfony server:start` (reads `.php-version` if present) |
-| **Kirby** | PHP-FPM via Caddy (Homebrew PHP, version per project) |
+| **Kirby** | PHP built-in server (`php -S`), proxied by Caddy (Homebrew PHP, version per project) |
 | **Axum** | `cargo run` |
 
 The design is intentionally stack-agnostic — anything that binds to a port can be added as a project type. Caddy proxies it; `zapusk` manages the process.
@@ -55,7 +55,9 @@ The trade-off is no container isolation. If that is acceptable for your workflow
 ```
 ~/.config/zapusk/
 ├── config.toml       ← project registry + caddy settings
-└── Caddyfile         ← auto-generated, do not edit manually
+├── Caddyfile         ← auto-generated, do not edit manually
+├── logs/             ← stdout/stderr log files per project (<name>.out, <name>.err)
+└── pids/             ← pidfiles for process re-adoption across sessions (<name>.pid)
 ```
 
 ```
@@ -68,7 +70,7 @@ src/
 │   └── ui.rs         # Ratatui rendering (project list, log panel, status bar)
 ├── core/
 │   ├── project.rs    # Project model (config + runtime state + log ring buffer)
-│   ├── manager.rs    # Child process spawning, stdout/stderr streaming via tokio
+│   ├── manager.rs    # Child process spawning, log file tailing, pidfile tracking
 │   ├── caddy.rs      # Caddyfile generation and `caddy reload`
 │   ├── config.rs     # TOML config deserialization + ProjectType
 │   └── discovery.rs  # Listening-port discovery + stack heuristics
@@ -140,7 +142,7 @@ Should be runnable at any time, not just on first install.
 ### Checks performed
 
 - **System:** caddy binary, dnsmasq installed/running/configured, DNS resolution
-- **PHP:** per-version binary and FPM socket (only if Kirby projects exist)
+- **PHP:** per-version binary present (only if Kirby projects exist)
 - **Projects:** path exists, expected files present, required binaries in PATH
 - **Caddy:** Caddyfile exists, `caddy validate` passes
 
@@ -158,9 +160,6 @@ System
 PHP
   ✓ php@8.1 found at /opt/homebrew/opt/php@8.1/bin/php
   ✓ php@8.3 found at /opt/homebrew/opt/php@8.3/bin/php
-  ✓ php8.1-fpm running
-  ✗ php8.3-fpm not running
-    → run: brew services start php@8.3
 
 Projects
   ✓ myshop       /home/user/projects/myshop (phoenix)
@@ -280,17 +279,17 @@ Field behavior:
 
 ### Startup diagnostics in logs
 
-When starting a project, zapusk writes explicit steps to project logs:
+When starting a project, zapusk writes diagnostic information directly to the project's log pane:
 
-1. ensure Caddy config
-2. request process start
-3. verify domain reachability using `curl`
+- `[zapusk] command: <bin> <args>` — the exact command that was launched
+- `[zapusk] <note>` — any warnings before start (e.g. PHP binary fallback: `php@8.1: arm64 Homebrew path not found, using Intel path: ...`)
+- `[zapusk] start failed: <error>` — if the binary is not found or not executable
+- Caddy reload errors are also appended to the project log if Caddy fails to apply the new config
 
-If a project is marked started but domain is not reachable, you will see a
-`domain check failed: ...` log line with the curl error.
-
-If the configured port is already in use, zapusk adopts the existing process and
-shows a conflict warning in status (`adopted existing process`).
+If the configured port is already in use, zapusk detects the existing process and
+adopts it — either from a pidfile (previously managed by zapusk) or via `lsof` port
+lookup. On the next `zapusk` start, pidfiles allow previously-running projects to be
+re-adopted automatically without having been stopped.
 
 ---
 
@@ -317,6 +316,7 @@ port = 8001
 type = "kirby"
 php_version = "8.1"        # required for kirby — selects Homebrew PHP version
 path = "/home/user/projects/company-site"
+# public_dir = "public"    # optional: document root subfolder (default: "public")
 
 [[projects]]
 name = "blog"
@@ -371,11 +371,18 @@ highlight_bg  = "#282837"  # selected-item background
 
 ---
 
+### Deploy locally
+```
+cargo install --path . --force
+strip ~/.cargo/bin/zapusk
+```
+
+---
+
 ## TODO / Ideas
 
 ### Features
 - [ ] Watch config file for changes and hot-reload project list
-- [ ] Pidfile to detect projects left running from a previous session
 
 ### Distribution
 - [ ] Shell completions (bash, zsh, fish) via `clap`

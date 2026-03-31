@@ -32,24 +32,37 @@ pub fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the PHP binary path for a given version.
-/// On macOS, uses Homebrew paths. Falls back to `php` in PATH.
-pub fn php_binary_path(version: Option<&str>) -> String {
+/// Resolve the PHP binary and return `(path, notes)`.
+/// Notes are non-empty when a fallback was used — suitable for logging to the project log.
+pub fn php_binary_resolved(version: Option<&str>) -> (String, Vec<String>) {
     match version {
         #[cfg(target_os = "macos")]
-        Some(v) => format!("/opt/homebrew/opt/php@{}/bin/php", v),
+        Some(v) => {
+            let arm = format!("/opt/homebrew/opt/php@{}/bin/php", v);
+            let intel = format!("/usr/local/opt/php@{}/bin/php", v);
+            if std::path::Path::new(&arm).exists() {
+                (arm, vec![])
+            } else if std::path::Path::new(&intel).exists() {
+                (
+                    intel.clone(),
+                    vec![format!(
+                        "php@{}: arm64 Homebrew path not found, using Intel path: {}",
+                        v, intel
+                    )],
+                )
+            } else {
+                (
+                    "php".into(),
+                    vec![format!(
+                        "php@{}: not found in Homebrew (/opt/homebrew or /usr/local), falling back to system `php` from PATH",
+                        v
+                    )],
+                )
+            }
+        }
         #[cfg(not(target_os = "macos"))]
-        Some(v) => format!("php{}", v),
-        None => "php".into(),
-    }
-}
-
-/// Default PHP-FPM socket path template (with `{version}` placeholder).
-pub fn default_fpm_socket_template() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "/opt/homebrew/var/run/php/php{version}-fpm.sock"
-    } else {
-        "/run/php/php{version}-fpm.sock"
+        Some(v) => (format!("php{}", v), vec![]),
+        None => ("php".into(), vec![]),
     }
 }
 

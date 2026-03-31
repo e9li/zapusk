@@ -48,6 +48,7 @@ pub async fn run() -> Result<()> {
         project_type,
         path,
         php_version,
+        public_dir: None,
         command: None,
         upstream_host: None,
         args: vec![],
