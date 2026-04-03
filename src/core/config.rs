@@ -130,16 +130,16 @@ impl ProjectType {
                 let (php_bin, notes) =
                     platform::php_binary_resolved(config.php_version.as_deref());
                 let doc_root = config.public_dir.as_deref().unwrap_or("public");
-                (
-                    php_bin,
-                    vec![
-                        "-S".into(),
-                        format!("{}:{}", config.domain, config.port),
-                        "-t".into(),
-                        doc_root.into(),
-                    ],
-                    notes,
-                )
+                let mut args = vec![
+                    "-S".into(),
+                    format!("{}:{}", config.domain, config.port),
+                ];
+                if doc_root != "/" {
+                    args.push("-t".into());
+                    args.push(doc_root.into());
+                }
+                args.push("kirby/router.php".into());
+                (php_bin, args, notes)
             }
             ProjectType::Axum => ("cargo".into(), vec!["run".into()], vec![]),
         }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 
-use crate::core::config::{CaddyConfig, ProjectConfig};
+use crate::core::config::{CaddyConfig, ProjectConfig, ProjectType};
 
 /// Generate a Caddyfile from all project configs.
 /// If `project.tls = true`, the site uses `https://...` with `tls internal`.
@@ -27,37 +27,75 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
             format!("http://{}", project.domain)
         };
 
-        let mut directives = Vec::new();
+        out.push_str(&format!("{} {{\n", domain));
 
         if project.tls {
-            directives.push("tls internal".to_string());
+            out.push_str("\ttls internal\n");
         }
 
-        if let Some(host) = project
-            .upstream_host
-            .as_deref()
-            .map(str::trim)
-            .filter(|h| !h.is_empty())
-        {
-            directives.push(format!(
-                "reverse_proxy {}",
-                format_host_port(host, project.port)
-            ));
+        if project.project_type == ProjectType::Kirby {
+            // Kirby: serve static files from Caddy, proxy dynamic requests to PHP
+            let doc_root = if project.public_dir.as_deref() == Some("/") {
+                project.path.clone()
+            } else {
+                let sub = project.public_dir.as_deref().unwrap_or("public");
+                format!("{}/{}", project.path, sub)
+            };
+
+            out.push_str(&format!("\troot * {}\n", doc_root));
+            out.push_str("\tencode zstd gzip\n");
+            out.push_str("\t@blocked {\n");
+            out.push_str("\t\tpath /content/* /site/* /kirby/* /.*\n");
+            out.push_str("\t}\n");
+            out.push_str("\terror @blocked \"Not found\" 404\n");
+            out.push_str("\t@static file\n");
+            out.push_str("\thandle @static {\n");
+            out.push_str("\t\tfile_server\n");
+            out.push_str("\t}\n");
+            out.push_str("\thandle {\n");
+
+            if let Some(host) = project
+                .upstream_host
+                .as_deref()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+            {
+                out.push_str(&format!(
+                    "\t\treverse_proxy {}\n",
+                    format_host_port(host, project.port)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\t\treverse_proxy 127.0.0.1:{} [::1]:{} {{\n",
+                    project.port, project.port
+                ));
+                out.push_str("\t\t\tlb_policy first\n");
+                out.push_str("\t\t}\n");
+            }
+
+            out.push_str("\t}\n");
         } else {
-            // Prefer IPv4 loopback first (Symfony often binds only to 127.0.0.1),
-            // but keep IPv6 loopback as fallback for apps bound on ::1.
-            directives.push(format!(
-                "reverse_proxy 127.0.0.1:{} [::1]:{} {{",
-                project.port, project.port
-            ));
-            directives.push("lb_policy first".to_string());
-            directives.push("}".to_string());
+            // Non-Kirby: simple reverse proxy
+            if let Some(host) = project
+                .upstream_host
+                .as_deref()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+            {
+                out.push_str(&format!(
+                    "\treverse_proxy {}\n",
+                    format_host_port(host, project.port)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\treverse_proxy 127.0.0.1:{} [::1]:{} {{\n",
+                    project.port, project.port
+                ));
+                out.push_str("\t\tlb_policy first\n");
+                out.push_str("\t}\n");
+            }
         }
 
-        out.push_str(&format!("{} {{\n", domain));
-        for d in &directives {
-            out.push_str(&format!("\t{}\n", d));
-        }
         out.push_str("}\n\n");
     }
 
