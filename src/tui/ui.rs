@@ -366,33 +366,25 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(status_color),
                 ),
                 Span::styled(
-                    format!("{:<16}", project.config.name),
+                    if project.config.name.len() > 16 {
+                        format!("{:.13}...", project.config.name)
+                    } else {
+                        format!("{:<16}", project.config.name)
+                    },
                     Style::default().fg(t().text),
                 ),
                 origin_badge(project.origin.as_ref()),
                 Span::styled(
-                    format!(" {}", project.config.project_type.label()),
-                    Style::default().fg(t().accent),
+                    format!(" :{}", project.config.port),
+                    Style::default().fg(t().text_dim),
                 ),
                 Span::styled(
-                    if project.config.tls {
-                        " tls:on"
-                    } else {
-                        " tls:off"
-                    },
-                    Style::default().fg(if project.config.tls {
-                        t().ok
-                    } else {
-                        t().text_dim
-                    }),
+                    format!(" {}", project.config.project_type.label()),
+                    Style::default().fg(t().accent),
                 ),
             ];
 
             if project.is_running() {
-                spans.push(Span::styled(
-                    format!(" :{}", project.config.port),
-                    Style::default().fg(t().text_dim),
-                ));
                 if let Some(started) = project.started_at {
                     let uptime = Local::now() - started;
                     let total_secs = uptime.num_seconds().max(0);
@@ -491,12 +483,12 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
         ),
     ];
     if let Some(ref origin) = project.origin {
-        let (tag, color) = match origin {
-            ProcessOrigin::Managed => ("[M]", t().ok),
-            ProcessOrigin::Adopted => ("[A]", t().warn),
+        let (tag, label, color) = match origin {
+            ProcessOrigin::Managed => ("[M]", "managed", t().ok),
+            ProcessOrigin::Adopted => ("[A]", "adopted", t().warn),
         };
         status_line.push(Span::styled(
-            format!("  {}", tag),
+            format!("  {} {}", tag, label),
             Style::default().fg(color),
         ));
     }
