@@ -134,7 +134,7 @@ impl ProjectType {
                     php_bin,
                     vec![
                         "-S".into(),
-                        format!("localhost:{}", config.port),
+                        format!("{}:{}", config.domain, config.port),
                         "-t".into(),
                         doc_root.into(),
                     ],

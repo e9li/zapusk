@@ -50,6 +50,33 @@ The trade-off is no container isolation. If that is acceptable for your workflow
 
 ---
 
+## Framework notes
+
+### Symfony: trusted proxies
+
+Since Caddy reverse-proxies requests to the Symfony dev server, Symfony sees all requests as plain HTTP from localhost. Without trusted proxy configuration, `app.request.getSchemeAndHttpHost()` returns `http://` and the web debug toolbar may not appear.
+
+Add to every Symfony project managed by zapusk:
+
+1. In `.env`, uncomment or add:
+
+```
+TRUSTED_PROXIES=127.0.0.1
+```
+
+2. In `config/packages/framework.yaml`, add under `when@dev:` → `framework:`:
+
+```yaml
+when@dev:
+    framework:
+        trusted_proxies: '%env(TRUSTED_PROXIES)%'
+        trusted_headers: ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port']
+```
+
+This applies to both Symfony 7 and 8.
+
+---
+
 ## Architecture
 
 ```

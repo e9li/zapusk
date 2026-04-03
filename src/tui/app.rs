@@ -516,11 +516,15 @@ impl App {
             } => {
                 self.manager.mark_exited(&project_name);
                 if let Some(p) = self.find_project_mut(&project_name) {
-                    p.status = if success {
-                        ProjectStatus::Stopped
-                    } else {
-                        ProjectStatus::Failed("exited with error".into())
-                    };
+                    // If already Stopped (set by stop_project), don't override to Failed.
+                    // Signal-killed processes exit non-success, which is expected on stop.
+                    if p.status != ProjectStatus::Stopped {
+                        p.status = if success {
+                            ProjectStatus::Stopped
+                        } else {
+                            ProjectStatus::Failed("exited with error".into())
+                        };
+                    }
                     p.pid = None;
                     p.origin = None;
                     p.started_at = None;
