@@ -33,29 +33,25 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
             directives.push("tls internal".to_string());
         }
 
-        match project.project_type {
-            _ => {
-                if let Some(host) = project
-                    .upstream_host
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|h| !h.is_empty())
-                {
-                    directives.push(format!(
-                        "reverse_proxy {}",
-                        format_host_port(host, project.port)
-                    ));
-                } else {
-                    // Prefer IPv4 loopback first (Symfony often binds only to 127.0.0.1),
-                    // but keep IPv6 loopback as fallback for apps bound on ::1.
-                    directives.push(format!(
-                        "reverse_proxy 127.0.0.1:{} [::1]:{} {{",
-                        project.port, project.port
-                    ));
-                    directives.push("lb_policy first".to_string());
-                    directives.push("}".to_string());
-                }
-            }
+        if let Some(host) = project
+            .upstream_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            directives.push(format!(
+                "reverse_proxy {}",
+                format_host_port(host, project.port)
+            ));
+        } else {
+            // Prefer IPv4 loopback first (Symfony often binds only to 127.0.0.1),
+            // but keep IPv6 loopback as fallback for apps bound on ::1.
+            directives.push(format!(
+                "reverse_proxy 127.0.0.1:{} [::1]:{} {{",
+                project.port, project.port
+            ));
+            directives.push("lb_policy first".to_string());
+            directives.push("}".to_string());
         }
 
         out.push_str(&format!("{} {{\n", domain));
