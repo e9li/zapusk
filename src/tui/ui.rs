@@ -1,10 +1,10 @@
 use chrono::Local;
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
 };
 
 use std::sync::OnceLock;
@@ -229,11 +229,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Title bar — right-aligned, no border
     let version = env!("CARGO_PKG_VERSION");
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!("[ zapusk \u{2022} v{} ]", version),
-            Style::default().fg(t().text),
-        ),
-        Span::raw(" "),
+        Span::styled("[ ", Style::default().fg(t().text)),
+        Span::styled("ZAPUSK", Style::default().fg(t().accent)).add_modifier(Modifier::BOLD),
+        Span::styled(format!(" - v{} ]", version), Style::default().fg(t().text)),
     ]))
     .alignment(Alignment::Right);
     frame.render_widget(title, root[0]);
