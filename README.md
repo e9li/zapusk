@@ -75,6 +75,23 @@ when@dev:
 
 This applies to both Symfony 7 and 8.
 
+### Kirby: Caddy static files and base URL
+
+Kirby projects get a special Caddy configuration: static files (images, CSS, JS, media) are served directly by Caddy with correct MIME types, while dynamic requests are proxied to PHP's built-in server using Kirby's own `kirby/router.php`.
+
+Caddy also blocks access to sensitive directories (`/content/*`, `/site/*`, `/kirby/*`, `/.*`) at the reverse proxy level.
+
+Since PHP's built-in server doesn't know it runs behind a TLS reverse proxy, Kirby may generate `http://` URLs by default. To fix this, set the base URL in your Kirby project config:
+
+```php
+// site/config/config.php
+return [
+    'url' => 'https://your-project.test',
+];
+```
+
+This ensures all generated links (assets, media, panel) use the correct scheme and domain.
+
 ---
 
 ## Architecture
