@@ -9,6 +9,7 @@ pub const LOG_BUFFER_SIZE: usize = 200;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectStatus {
     Stopped,
+    Starting,
     Running,
     Failed(String),
 }
@@ -23,6 +24,7 @@ impl ProjectStatus {
     pub fn label(&self) -> &str {
         match self {
             ProjectStatus::Stopped => "stopped",
+            ProjectStatus::Starting => "starting",
             ProjectStatus::Running => "running",
             ProjectStatus::Failed(_) => "failed",
         }
@@ -81,7 +83,10 @@ impl Project {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self.status, ProjectStatus::Running)
+        matches!(
+            self.status,
+            ProjectStatus::Running | ProjectStatus::Starting
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use tokio::process::Command;
+use tokio::time::{Duration, timeout};
 
 use crate::core::config::Config;
 
@@ -37,10 +38,11 @@ pub struct ServiceInfo {
 }
 
 pub async fn discover_services(config: Option<&Config>) -> Result<Vec<ServiceInfo>> {
-    let output = Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"])
-        .output()
-        .await?;
+    let Some(output) =
+        run_command_timeout("lsof", &["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"], 1800).await
+    else {
+        return Ok(vec![]);
+    };
 
     let text = String::from_utf8_lossy(&output.stdout);
     let mut entries = parse_lsof_listeners(&text);
@@ -140,28 +142,19 @@ fn parse_port(addr: &str) -> Option<u16> {
 }
 
 async fn process_command_line(pid: u32) -> Option<String> {
-    let out = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .await
-        .ok()?;
+    let pid_text = pid.to_string();
+    let out = run_command_timeout("ps", &["-p", &pid_text, "-o", "command="], 900).await?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 async fn process_cwd(pid: u32) -> Option<String> {
-    let out = Command::new("lsof")
-        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-        .output()
-        .await
-        .ok()?;
+    let pid_text = pid.to_string();
+    let out =
+        run_command_timeout("lsof", &["-a", "-p", &pid_text, "-d", "cwd", "-Fn"], 900).await?;
     if !out.status.success() {
         return None;
     }
@@ -197,4 +190,18 @@ fn guess_stack(command: &str, command_line: Option<&str>, cwd: Option<&str>) -> 
     } else {
         StackKind::Unknown
     }
+}
+
+async fn run_command_timeout(
+    cmd: &str,
+    args: &[&str],
+    timeout_ms: u64,
+) -> Option<std::process::Output> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+
+    timeout(Duration::from_millis(timeout_ms), command.output())
+        .await
+        .ok()
+        .and_then(|r| r.ok())
 }

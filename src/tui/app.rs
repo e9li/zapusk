@@ -1,15 +1,18 @@
 use anyhow::Result;
 use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 
 use crate::core::caddy;
-use crate::core::config::{config_path, Config, IgnoredService, ProjectConfig, ProjectType};
+use crate::core::config::{Config, IgnoredService, ProjectConfig, ProjectType, config_path};
 use crate::core::discovery::ServiceInfo;
-use crate::core::discovery::{discover_services, StackKind};
+use crate::core::discovery::{StackKind, discover_services};
 use crate::core::manager::{Manager, ManagerEvent};
 use crate::core::project::{LogEntry, ProcessOrigin, Project, ProjectStatus};
 
@@ -25,6 +28,26 @@ pub enum ServiceState {
     Running,
     Paused,
     Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StartupPhase {
+    EnsuringCaddy,
+    StartingProcess,
+    VerifyingDomain,
+}
+
+#[derive(Debug)]
+enum BackgroundEvent {
+    UnmanagedRefreshed(Result<Vec<ServiceInfo>, String>),
+    ServiceStatesRefreshed {
+        caddy: ServiceState,
+        dnsmasq: ServiceState,
+    },
+    DomainVerificationDone {
+        project_name: String,
+        result: Result<u16, String>,
+    },
 }
 
 fn default_web_port_rules() -> Vec<String> {
@@ -396,6 +419,12 @@ pub struct App {
     last_service_refresh: Instant,
     pub caddy_state: ServiceState,
     pub dnsmasq_state: ServiceState,
+    startup_phases: HashMap<String, StartupPhase>,
+    spinner_frame: usize,
+    discovery_refresh_in_flight: bool,
+    service_refresh_in_flight: bool,
+    app_event_tx: mpsc::Sender<BackgroundEvent>,
+    app_event_rx: mpsc::Receiver<BackgroundEvent>,
     pub(crate) manager: Manager,
     pub(crate) event_rx: mpsc::Receiver<ManagerEvent>,
 }
@@ -403,6 +432,7 @@ pub struct App {
 impl App {
     pub fn new(config: Config) -> Self {
         let (tx, rx) = mpsc::channel(256);
+        let (app_event_tx, app_event_rx) = mpsc::channel(64);
 
         let projects = config.projects.iter().cloned().map(Project::new).collect();
         crate::tui::ui::init_theme(config.theme.as_ref());
@@ -433,6 +463,12 @@ impl App {
             last_service_refresh: Instant::now(),
             caddy_state: ServiceState::Stopped,
             dnsmasq_state: ServiceState::Stopped,
+            startup_phases: HashMap::new(),
+            spinner_frame: 0,
+            discovery_refresh_in_flight: false,
+            service_refresh_in_flight: false,
+            app_event_tx,
+            app_event_rx,
             manager: Manager::new(tx),
             event_rx: rx,
         }
@@ -440,6 +476,9 @@ impl App {
 
     /// Main event loop tick — call this repeatedly from main
     pub async fn tick(&mut self) -> Result<()> {
+        let tick_started = Instant::now();
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+
         // Poll child processes for exit (non-blocking)
         for event in self.manager.poll_exits() {
             self.handle_manager_event(event);
@@ -450,15 +489,12 @@ impl App {
             self.handle_manager_event(event);
         }
 
-        if self.last_discovery_refresh.elapsed() >= Duration::from_secs(10) {
-            self.refresh_unmanaged().await;
-            self.last_discovery_refresh = Instant::now();
+        // Drain app background events (non-blocking)
+        while let Ok(event) = self.app_event_rx.try_recv() {
+            self.handle_background_event(event);
         }
 
-        if self.last_service_refresh.elapsed() >= Duration::from_secs(6) {
-            self.refresh_service_states().await;
-            self.last_service_refresh = Instant::now();
-        }
+        self.schedule_background_refreshes();
 
         // Handle keyboard input (100ms timeout so we don't busy-loop)
         if event::poll(Duration::from_millis(100))? {
@@ -472,7 +508,120 @@ impl App {
             }
         }
 
+        let elapsed = tick_started.elapsed();
+        if elapsed > Duration::from_millis(250) {
+            app_diag_log(&format!("slow tick: {}ms", elapsed.as_millis()));
+        }
+
         Ok(())
+    }
+
+    fn schedule_background_refreshes(&mut self) {
+        if self.last_discovery_refresh.elapsed() >= Duration::from_secs(10)
+            && !self.discovery_refresh_in_flight
+        {
+            self.discovery_refresh_in_flight = true;
+            self.last_discovery_refresh = Instant::now();
+            let cfg = self.config.clone();
+            let tx = self.app_event_tx.clone();
+            tokio::spawn(async move {
+                let result = discover_services(Some(&cfg))
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(BackgroundEvent::UnmanagedRefreshed(result)).await;
+            });
+        }
+
+        if self.last_service_refresh.elapsed() >= Duration::from_secs(6)
+            && !self.service_refresh_in_flight
+        {
+            self.service_refresh_in_flight = true;
+            self.last_service_refresh = Instant::now();
+            let tx = self.app_event_tx.clone();
+            let tld = self.config.tld.clone();
+            tokio::spawn(async move {
+                let caddy = detect_caddy_state().await;
+                let dnsmasq = detect_dnsmasq_state(&tld).await;
+                let _ = tx
+                    .send(BackgroundEvent::ServiceStatesRefreshed { caddy, dnsmasq })
+                    .await;
+            });
+        }
+    }
+
+    fn handle_background_event(&mut self, event: BackgroundEvent) {
+        match event {
+            BackgroundEvent::UnmanagedRefreshed(result) => {
+                self.discovery_refresh_in_flight = false;
+                match result {
+                    Ok(services) => {
+                        self.unmanaged_all_services =
+                            services.into_iter().filter(|s| !s.managed).collect();
+                        self.apply_unmanaged_filter();
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Discovery failed: {}", e));
+                        app_diag_log(&format!("discovery refresh failed: {}", e));
+                    }
+                }
+            }
+            BackgroundEvent::ServiceStatesRefreshed { caddy, dnsmasq } => {
+                self.service_refresh_in_flight = false;
+                self.caddy_state = caddy;
+                self.dnsmasq_state = dnsmasq;
+            }
+            BackgroundEvent::DomainVerificationDone {
+                project_name,
+                result,
+            } => {
+                self.startup_phases.remove(&project_name);
+                if let Some(project) = self.find_project_mut(&project_name) {
+                    if matches!(project.status, ProjectStatus::Starting) {
+                        project.status = ProjectStatus::Running;
+                    }
+                }
+
+                match result {
+                    Ok(code) => {
+                        self.append_system_log(
+                            &project_name,
+                            format!("domain reachable (HTTP {})", code),
+                            false,
+                        );
+                        self.status_message = Some(format!(
+                            "{} started - domain reachable (HTTP {})",
+                            project_name, code
+                        ));
+                    }
+                    Err(reason) => {
+                        self.append_system_log(
+                            &project_name,
+                            format!("domain check failed: {}", reason),
+                            true,
+                        );
+                        self.status_message = Some(format!(
+                            "{} started, but domain check failed: {}",
+                            project_name, reason
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn startup_phase_label(&self, project_name: &str) -> Option<&'static str> {
+        self.startup_phases
+            .get(project_name)
+            .map(|phase| match phase {
+                StartupPhase::EnsuringCaddy => "caddy",
+                StartupPhase::StartingProcess => "spawn",
+                StartupPhase::VerifyingDomain => "verify",
+            })
+    }
+
+    pub fn spinner_glyph(&self) -> &'static str {
+        const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[self.spinner_frame % FRAMES.len()]
     }
 
     fn handle_manager_event(&mut self, event: ManagerEvent) {
@@ -491,8 +640,13 @@ impl App {
                 pid,
                 adopted,
             } => {
+                let keep_starting = self.startup_phases.contains_key(&project_name);
                 if let Some(p) = self.find_project_mut(&project_name) {
-                    p.status = ProjectStatus::Running;
+                    p.status = if keep_starting {
+                        ProjectStatus::Starting
+                    } else {
+                        ProjectStatus::Running
+                    };
                     p.pid = Some(pid);
                     p.origin = Some(if adopted {
                         ProcessOrigin::Adopted
@@ -506,6 +660,8 @@ impl App {
                         "{} conflict: port already in use, adopted existing process (pid {})",
                         project_name, pid
                     )
+                } else if keep_starting {
+                    format!("{}: process started, verifying domain...", project_name)
                 } else {
                     format!("{} started", project_name)
                 });
@@ -515,6 +671,7 @@ impl App {
                 success,
             } => {
                 self.manager.mark_exited(&project_name);
+                self.startup_phases.remove(&project_name);
                 if let Some(p) = self.find_project_mut(&project_name) {
                     // If already Stopped (set by stop_project), don't override to Failed.
                     // Signal-killed processes exit non-success, which is expected on stop.
@@ -556,54 +713,6 @@ impl App {
         }
     }
 
-    async fn verify_project_domain(&self, config: &ProjectConfig) -> Result<u16, String> {
-        let scheme = if config.tls { "https" } else { "http" };
-        let url = format!("{}://{}", scheme, config.domain);
-        let mut last_error = String::from("unreachable");
-
-        for _ in 0..8 {
-            let mut cmd = Command::new("curl");
-            cmd.arg("-sS")
-                .arg("-o")
-                .arg("/dev/null")
-                .arg("-w")
-                .arg("%{http_code}")
-                .arg("--max-time")
-                .arg("2");
-
-            if config.tls {
-                cmd.arg("-k");
-            }
-
-            let output = cmd.arg(&url).output().await;
-
-            match output {
-                Ok(out) if out.status.success() => {
-                    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if let Ok(code) = text.parse::<u16>() {
-                        if code > 0 {
-                            return Ok(code);
-                        }
-                    }
-                    last_error = format!("unexpected curl output: {}", text);
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                    if !stderr.is_empty() {
-                        last_error = stderr;
-                    }
-                }
-                Err(e) => {
-                    last_error = e.to_string();
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        Err(last_error)
-    }
-
     pub(crate) fn select_next(&mut self) {
         if !self.projects.is_empty() {
             self.selected = (self.selected + 1) % self.projects.len();
@@ -643,6 +752,12 @@ impl App {
             let config = project.config.clone();
             let name = config.name.clone();
 
+            if let Some(p) = self.find_project_mut(&name) {
+                p.status = ProjectStatus::Starting;
+            }
+            self.startup_phases
+                .insert(name.clone(), StartupPhase::EnsuringCaddy);
+
             // Ensure Caddy is running with current config before starting the project
             self.append_system_log(&name, "step 1/3: ensuring Caddy config", false);
             self.status_message = Some(format!("{}: step 1/3 ensuring Caddy config...", name));
@@ -650,45 +765,38 @@ impl App {
                 self.append_system_log(&name, caddy_err, true);
             }
 
+            self.startup_phases
+                .insert(name.clone(), StartupPhase::StartingProcess);
             match self.manager.start(&config).await {
-                Ok(status) => {
+                Ok(_status) => {
                     if let Some(p) = self.find_project_mut(&name) {
-                        p.status = status;
+                        p.status = ProjectStatus::Starting;
                         p.origin = Some(ProcessOrigin::Managed);
                     }
 
                     self.append_system_log(&name, "step 2/3: process start requested", false);
-                    self.status_message = Some(format!("{}: step 2/3 process started", name));
 
+                    self.startup_phases
+                        .insert(name.clone(), StartupPhase::VerifyingDomain);
                     self.append_system_log(&name, "step 3/3: verifying domain with curl", false);
                     self.status_message = Some(format!("{}: step 3/3 verifying domain...", name));
 
-                    match self.verify_project_domain(&config).await {
-                        Ok(code) => {
-                            self.append_system_log(
-                                &name,
-                                format!("domain reachable (HTTP {})", code),
-                                false,
-                            );
-                            self.status_message = Some(format!(
-                                "{} started - domain reachable (HTTP {})",
-                                name, code
-                            ));
-                        }
-                        Err(reason) => {
-                            self.append_system_log(
-                                &name,
-                                format!("domain check failed: {}", reason),
-                                true,
-                            );
-                            self.status_message = Some(format!(
-                                "{} started, but domain check failed: {}",
-                                name, reason
-                            ));
-                        }
-                    }
+                    let tx = self.app_event_tx.clone();
+                    tokio::spawn(async move {
+                        let result = verify_project_domain_static(&config).await;
+                        let _ = tx
+                            .send(BackgroundEvent::DomainVerificationDone {
+                                project_name: name,
+                                result,
+                            })
+                            .await;
+                    });
                 }
                 Err(e) => {
+                    self.startup_phases.remove(&name);
+                    if let Some(p) = self.find_project_mut(&name) {
+                        p.status = ProjectStatus::Failed(e.to_string());
+                    }
                     self.append_system_log(&name, format!("start failed: {}", e), true);
                     self.status_message = Some(format!("Error: {}", e));
                 }
@@ -713,6 +821,7 @@ impl App {
 
     pub(crate) async fn stop_project(&mut self, name: &str) {
         let name = name.to_string();
+        self.startup_phases.remove(&name);
         match self.manager.stop(&name).await {
             Ok(()) => {
                 if let Some(p) = self.find_project_mut(&name) {
@@ -872,7 +981,10 @@ impl App {
             }
             Ok(p) => p,
             Err(_) => {
-                self.status_message = Some(format!("Invalid port '{}': must be a number 1-65535", form.port));
+                self.status_message = Some(format!(
+                    "Invalid port '{}': must be a number 1-65535",
+                    form.port
+                ));
                 return;
             }
         };
@@ -1015,7 +1127,10 @@ impl App {
             }
             Ok(p) => p,
             Err(_) => {
-                self.status_message = Some(format!("Invalid port '{}': must be a number 1-65535", form.port));
+                self.status_message = Some(format!(
+                    "Invalid port '{}': must be a number 1-65535",
+                    form.port
+                ));
                 return;
             }
         };
@@ -1374,7 +1489,12 @@ impl App {
                 return domain;
             }
         }
-        format!("{}-{}.{}", base, chrono::Local::now().timestamp(), self.config.tld)
+        format!(
+            "{}-{}.{}",
+            base,
+            chrono::Local::now().timestamp(),
+            self.config.tld
+        )
     }
 
     /// Rewrite config.toml from current state.
@@ -1477,20 +1597,24 @@ async fn stop_dnsmasq_best_effort() -> Option<String> {
 async fn detect_caddy_state() -> ServiceState {
     let admin_up = TcpStream::connect("127.0.0.1:2019").is_ok();
 
-    let on_port_80 = Command::new("lsof")
-        .args(["-nP", "-iTCP:80", "-sTCP:LISTEN", "-Fpc"])
-        .output()
-        .await
-        .ok()
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout).lines().any(|line| {
-                    line.strip_prefix('c')
-                        .map(|c| c.contains("caddy"))
-                        .unwrap_or(false)
-                })
-        })
-        .unwrap_or(false);
+    let on_port_80 = timeout(
+        Duration::from_millis(1200),
+        Command::new("lsof")
+            .args(["-nP", "-iTCP:80", "-sTCP:LISTEN", "-Fpc"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|o| {
+        o.status.success()
+            && String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                line.strip_prefix('c')
+                    .map(|c| c.contains("caddy"))
+                    .unwrap_or(false)
+            })
+    })
+    .unwrap_or(false);
 
     match (admin_up, on_port_80) {
         (true, true) => ServiceState::Running,
@@ -1500,36 +1624,113 @@ async fn detect_caddy_state() -> ServiceState {
 }
 
 async fn detect_dnsmasq_state(tld: &str) -> ServiceState {
-    let running = Command::new("pgrep")
-        .args(["-x", "dnsmasq"])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let running = timeout(
+        Duration::from_millis(1200),
+        Command::new("pgrep").args(["-x", "dnsmasq"]).output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|o| o.status.success())
+    .unwrap_or(false);
 
     if !running {
         return ServiceState::Stopped;
     }
 
     let test_host = format!("zapusk-health.{}", tld);
-    let resolves = Command::new("dig")
-        .args(["+short", &test_host, "@127.0.0.1"])
-        .output()
-        .await
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .map(|ip| ip == "127.0.0.1")
-        .unwrap_or(false);
+    let resolves = timeout(
+        Duration::from_millis(1500),
+        Command::new("dig")
+            .args(["+short", &test_host, "@127.0.0.1"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|o| {
+        if o.status.success() {
+            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        } else {
+            None
+        }
+    })
+    .map(|ip| ip == "127.0.0.1")
+    .unwrap_or(false);
 
     if resolves {
         ServiceState::Running
     } else {
         ServiceState::Paused
+    }
+}
+
+async fn verify_project_domain_static(config: &ProjectConfig) -> Result<u16, String> {
+    let scheme = if config.tls { "https" } else { "http" };
+    let url = format!("{}://{}", scheme, config.domain);
+    let mut last_error = String::from("unreachable");
+
+    for _ in 0..8 {
+        let mut cmd = Command::new("curl");
+        cmd.arg("-sS")
+            .arg("-o")
+            .arg("/dev/null")
+            .arg("-w")
+            .arg("%{http_code}")
+            .arg("--max-time")
+            .arg("2");
+
+        if config.tls {
+            cmd.arg("-k");
+        }
+
+        let output = timeout(Duration::from_secs(3), cmd.arg(&url).output()).await;
+
+        match output {
+            Ok(Ok(out)) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Ok(code) = text.parse::<u16>() {
+                    if code > 0 {
+                        return Ok(code);
+                    }
+                }
+                last_error = format!("unexpected curl output: {}", text);
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if !stderr.is_empty() {
+                    last_error = stderr;
+                }
+            }
+            Ok(Err(e)) => {
+                last_error = e.to_string();
+            }
+            Err(_) => {
+                last_error = "curl timed out".into();
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(last_error)
+}
+
+fn app_diag_log(message: &str) {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".config/zapusk/logs/zapusk.app.log");
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "[{}] {}", ts, message);
     }
 }
