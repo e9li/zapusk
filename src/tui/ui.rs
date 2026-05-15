@@ -352,10 +352,16 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
         .projects
         .iter()
         .map(|project| {
-            let (status_icon, status_color) = match &project.status {
-                ProjectStatus::Running => ("\u{25cf}", t().ok),
-                ProjectStatus::Stopped => ("\u{25cb}", t().text_dim),
-                ProjectStatus::Failed(_) => ("\u{2717}", t().err),
+            let startup_phase = app.startup_phase_label(&project.config.name);
+            let (status_icon, status_color) = if startup_phase.is_some() {
+                (app.spinner_glyph(), t().warn)
+            } else {
+                match &project.status {
+                    ProjectStatus::Running => ("\u{25cf}", t().ok),
+                    ProjectStatus::Starting => (app.spinner_glyph(), t().warn),
+                    ProjectStatus::Stopped => ("\u{25cb}", t().text_dim),
+                    ProjectStatus::Failed(_) => ("\u{2717}", t().err),
+                }
             };
 
             let mut spans = vec![
@@ -381,6 +387,13 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(t().accent),
                 ),
             ];
+
+            if let Some(phase) = startup_phase {
+                spans.push(Span::styled(
+                    format!(" {}", phase),
+                    Style::default().fg(t().warn),
+                ));
+            }
 
             if project.is_running() {
                 if let Some(started) = project.started_at {
@@ -467,6 +480,7 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
 
     let status_color = match &project.status {
         ProjectStatus::Running => t().ok,
+        ProjectStatus::Starting => t().warn,
         ProjectStatus::Stopped => t().text_dim,
         ProjectStatus::Failed(_) => t().err,
     };
