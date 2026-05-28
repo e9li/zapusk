@@ -10,7 +10,9 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::core::caddy;
-use crate::core::config::{Config, IgnoredService, ProjectConfig, ProjectType, config_path};
+use crate::core::config::{
+    Config, IgnoredService, ProjectConfig, ProjectType, config_path, parse_aliases,
+};
 use crate::core::discovery::ServiceInfo;
 use crate::core::discovery::{StackKind, discover_services};
 use crate::core::manager::{Manager, ManagerEvent};
@@ -115,6 +117,7 @@ pub enum ConfirmAction {
 pub enum AddField {
     Name,
     Domain,
+    Aliases,
     Port,
     UpstreamHost,
     Type,
@@ -130,6 +133,7 @@ pub struct AddForm {
     pub field: AddField,
     pub name: String,
     pub domain: String,
+    pub aliases: String,
     pub port: String,
     pub upstream_host: String,
     pub type_index: usize,
@@ -143,6 +147,7 @@ pub struct EditForm {
     pub field: AddField,
     pub name: String,
     pub domain: String,
+    pub aliases: String,
     pub port: String,
     pub upstream_host: String,
     pub type_index: usize,
@@ -156,6 +161,7 @@ impl AddForm {
             field: AddField::Name,
             name: String::new(),
             domain: String::new(),
+            aliases: String::new(),
             port: String::new(),
             upstream_host: String::new(),
             type_index: 0,
@@ -188,6 +194,7 @@ impl AddForm {
         match self.field {
             AddField::Name => &self.name,
             AddField::Domain => &self.domain,
+            AddField::Aliases => &self.aliases,
             AddField::Port => &self.port,
             AddField::UpstreamHost => &self.upstream_host,
             AddField::Type => self.project_type(),
@@ -206,6 +213,7 @@ impl AddForm {
         match self.field {
             AddField::Name => &mut self.name,
             AddField::Domain => &mut self.domain,
+            AddField::Aliases => &mut self.aliases,
             AddField::Port => &mut self.port,
             AddField::UpstreamHost => &mut self.upstream_host,
             AddField::Type => unreachable!("Type field uses cycle, not freetext"),
@@ -218,6 +226,7 @@ impl AddForm {
         match self.field {
             AddField::Name => "Name",
             AddField::Domain => "Domain",
+            AddField::Aliases => "Aliases (comma-separated)",
             AddField::Port => "Port",
             AddField::UpstreamHost => "Upstream host",
             AddField::Type => "Type",
@@ -238,6 +247,10 @@ impl AddForm {
                 false
             }
             AddField::Domain => {
+                self.field = AddField::Aliases;
+                false
+            }
+            AddField::Aliases => {
                 self.field = AddField::Port;
                 false
             }
@@ -274,6 +287,7 @@ impl EditForm {
             field: AddField::Name,
             name: project.name.clone(),
             domain: project.domain.clone(),
+            aliases: project.aliases.join(", "),
             port: project.port.to_string(),
             upstream_host: project.upstream_host.clone().unwrap_or_default(),
             type_index,
@@ -306,6 +320,7 @@ impl EditForm {
         match self.field {
             AddField::Name => &self.name,
             AddField::Domain => &self.domain,
+            AddField::Aliases => &self.aliases,
             AddField::Port => &self.port,
             AddField::UpstreamHost => &self.upstream_host,
             AddField::Type => self.project_type(),
@@ -324,6 +339,7 @@ impl EditForm {
         match self.field {
             AddField::Name => &mut self.name,
             AddField::Domain => &mut self.domain,
+            AddField::Aliases => &mut self.aliases,
             AddField::Port => &mut self.port,
             AddField::UpstreamHost => &mut self.upstream_host,
             AddField::Type => unreachable!("Type field uses cycle, not freetext"),
@@ -336,6 +352,7 @@ impl EditForm {
         match self.field {
             AddField::Name => "Name",
             AddField::Domain => "Domain",
+            AddField::Aliases => "Aliases (comma-separated)",
             AddField::Port => "Port",
             AddField::UpstreamHost => "Upstream host",
             AddField::Type => "Type",
@@ -351,6 +368,10 @@ impl EditForm {
                 false
             }
             AddField::Domain => {
+                self.field = AddField::Aliases;
+                false
+            }
+            AddField::Aliases => {
                 self.field = AddField::Port;
                 false
             }
@@ -1011,8 +1032,12 @@ impl App {
             self.status_message = Some(format!("Project '{}' already exists", form.name));
             return;
         }
-        if self.projects.iter().any(|p| p.config.domain == form.domain) {
-            self.status_message = Some(format!("Domain '{}' is already used", form.domain));
+        let aliases = parse_aliases(&form.aliases);
+        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
+            .chain(aliases.iter().map(String::as_str))
+            .collect();
+        if let Some(err) = self.hostname_conflict(&hosts, None) {
+            self.status_message = Some(err);
             return;
         }
         if self.projects.iter().any(|p| p.config.port == port) {
@@ -1023,6 +1048,7 @@ impl App {
         let config = ProjectConfig {
             name: form.name.clone(),
             domain: form.domain,
+            aliases,
             port,
             project_type,
             path: form.path,
@@ -1051,6 +1077,36 @@ impl App {
         self.status_message = Some(format!("Added {}", form.name));
     }
 
+    /// Check that the given hostnames don't collide with other projects or
+    /// with each other. `exclude_index`, when set, skips that project (for edits).
+    fn hostname_conflict(
+        &self,
+        hosts: &[&str],
+        exclude_index: Option<usize>,
+    ) -> Option<String> {
+        for i in 0..hosts.len() {
+            for j in (i + 1)..hosts.len() {
+                if hosts[i] == hosts[j] {
+                    return Some(format!("Duplicate hostname '{}'", hosts[i]));
+                }
+            }
+        }
+        for (idx, project) in self.projects.iter().enumerate() {
+            if Some(idx) == exclude_index {
+                continue;
+            }
+            for existing in project.config.all_hostnames() {
+                if hosts.iter().any(|h| *h == existing) {
+                    return Some(format!(
+                        "Domain '{}' is already used by '{}'",
+                        existing, project.config.name
+                    ));
+                }
+            }
+        }
+        None
+    }
+
     pub fn add_form_error(&self, form: &AddForm) -> Option<String> {
         if form.name.trim().is_empty() {
             return Some("Name cannot be empty".into());
@@ -1062,8 +1118,12 @@ impl App {
         if form.domain.trim().is_empty() {
             return Some("Domain cannot be empty".into());
         }
-        if self.projects.iter().any(|p| p.config.domain == form.domain) {
-            return Some(format!("Domain '{}' is already used", form.domain));
+        let aliases = parse_aliases(&form.aliases);
+        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
+            .chain(aliases.iter().map(String::as_str))
+            .collect();
+        if let Some(err) = self.hostname_conflict(&hosts, None) {
+            return Some(err);
         }
 
         let port = match form.port.parse::<u16>() {
@@ -1156,10 +1216,6 @@ impl App {
                 self.status_message = Some(format!("Project '{}' already exists", form.name));
                 return;
             }
-            if project.config.domain == form.domain {
-                self.status_message = Some(format!("Domain '{}' is already used", form.domain));
-                return;
-            }
             if project.config.port == port {
                 self.status_message =
                     Some(format!("Port {} is already used by another project", port));
@@ -1167,10 +1223,20 @@ impl App {
             }
         }
 
+        let aliases = parse_aliases(&form.aliases);
+        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
+            .chain(aliases.iter().map(String::as_str))
+            .collect();
+        if let Some(err) = self.hostname_conflict(&hosts, Some(form.project_index)) {
+            self.status_message = Some(err);
+            return;
+        }
+
         let existing = self.projects[form.project_index].config.clone();
         let updated = ProjectConfig {
             name: form.name.clone(),
             domain: form.domain,
+            aliases,
             port,
             project_type: project_type.clone(),
             path: form.path,
@@ -1216,13 +1282,12 @@ impl App {
         if form.domain.trim().is_empty() {
             return Some("Domain cannot be empty".into());
         }
-        if self
-            .projects
-            .iter()
-            .enumerate()
-            .any(|(idx, p)| idx != form.project_index && p.config.domain == form.domain)
-        {
-            return Some(format!("Domain '{}' is already used", form.domain));
+        let aliases = parse_aliases(&form.aliases);
+        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
+            .chain(aliases.iter().map(String::as_str))
+            .collect();
+        if let Some(err) = self.hostname_conflict(&hosts, Some(form.project_index)) {
+            return Some(err);
         }
 
         let port = match form.port.parse::<u16>() {
@@ -1386,6 +1451,7 @@ impl App {
         let project = ProjectConfig {
             name: name.clone(),
             domain,
+            aliases: vec![],
             port: service.port,
             project_type,
             path: service.cwd.clone().unwrap_or_default(),
@@ -1479,13 +1545,21 @@ impl App {
     fn unique_domain_for_name(&self, name: &str) -> String {
         let base = crate::core::slugify(name);
         let mut domain = format!("{}.{}", base, self.config.tld);
-        if !self.projects.iter().any(|p| p.config.domain == domain) {
+        if !self
+            .projects
+            .iter()
+            .any(|p| p.config.all_hostnames().any(|h| h == domain))
+        {
             return domain;
         }
 
         for i in 2..=1000 {
             domain = format!("{}-{}.{}", base, i, self.config.tld);
-            if !self.projects.iter().any(|p| p.config.domain == domain) {
+            if !self
+                .projects
+                .iter()
+                .any(|p| p.config.all_hostnames().any(|h| h == domain))
+            {
                 return domain;
             }
         }

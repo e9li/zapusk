@@ -47,6 +47,9 @@ fn default_tld() -> String {
 pub struct ProjectConfig {
     pub name: String,
     pub domain: String,
+    /// Additional hostnames that should route to this project (besides `domain`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     pub port: u16,
     #[serde(rename = "type")]
     pub project_type: ProjectType,
@@ -79,6 +82,22 @@ pub struct ProjectConfig {
 
 fn is_false(v: &bool) -> bool {
     !*v
+}
+
+impl ProjectConfig {
+    /// Iterator over the primary domain and all aliases.
+    pub fn all_hostnames(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.domain.as_str())
+            .chain(self.aliases.iter().map(String::as_str))
+    }
+}
+
+/// Parse a comma-separated alias string from user input into a clean Vec.
+pub fn parse_aliases(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
