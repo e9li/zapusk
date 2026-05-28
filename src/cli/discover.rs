@@ -101,7 +101,11 @@ fn import_service(target: &str, services: &[ServiceInfo], config: &mut Config) -
 
     let mut domain = format!("{}.{}", crate::core::slugify(&name), config.tld);
     let mut i = 2;
-    while config.projects.iter().any(|p| p.domain == domain) {
+    while config
+        .projects
+        .iter()
+        .any(|p| p.all_hostnames().any(|h| h == domain))
+    {
         domain = format!("{}-{}.{}", crate::core::slugify(&name), i, config.tld);
         i += 1;
     }
@@ -118,6 +122,7 @@ fn import_service(target: &str, services: &[ServiceInfo], config: &mut Config) -
     config.projects.push(ProjectConfig {
         name,
         domain,
+        aliases: vec![],
         port: service.port,
         project_type,
         path: cwd.clone(),

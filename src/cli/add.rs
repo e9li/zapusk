@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 
-use crate::core::config::{config_path, Config, ProjectConfig, ProjectType};
+use crate::core::config::{config_path, parse_aliases, Config, ProjectConfig, ProjectType};
 
 pub async fn run() -> Result<()> {
     println!("Add a new project to zapusk config\n");
@@ -11,6 +11,8 @@ pub async fn run() -> Result<()> {
     let slug = crate::core::slugify(&name);
     let default_domain = format!("{}.{}", slug, tld);
     let domain = prompt_with_default("Domain", &default_domain)?;
+    let aliases_raw = prompt_with_default("Additional domains (comma-separated)", "")?;
+    let aliases = parse_aliases(&aliases_raw);
     let port: u16 = prompt("Port")?.parse().context("Port must be a number 1-65535")?;
     if port == 0 {
         anyhow::bail!("Port must be between 1 and 65535");
@@ -36,14 +38,34 @@ pub async fn run() -> Result<()> {
         if config.projects.iter().any(|p| p.name == name) {
             anyhow::bail!("A project named '{}' already exists in config", name);
         }
-        if config.projects.iter().any(|p| p.domain == domain) {
-            anyhow::bail!("Domain '{}' is already used by another project", domain);
+        let candidates: Vec<&str> = std::iter::once(domain.as_str())
+            .chain(aliases.iter().map(String::as_str))
+            .collect();
+        for project in &config.projects {
+            for existing in project.all_hostnames() {
+                if candidates.iter().any(|c| *c == existing) {
+                    anyhow::bail!(
+                        "Domain '{}' is already used by project '{}'",
+                        existing,
+                        project.name
+                    );
+                }
+            }
+        }
+        // Internal duplicates within the new candidate list
+        for i in 0..candidates.len() {
+            for j in (i + 1)..candidates.len() {
+                if candidates[i] == candidates[j] {
+                    anyhow::bail!("Duplicate hostname '{}'", candidates[i]);
+                }
+            }
         }
     }
 
     let new_project = ProjectConfig {
         name: name.clone(),
         domain,
+        aliases,
         port,
         project_type,
         path,

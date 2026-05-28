@@ -446,6 +446,9 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = vec![];
 
     lines.push(detail_row("domain", &cfg.domain, t().text));
+    for alias in &cfg.aliases {
+        lines.push(detail_row("alias", alias, t().text));
+    }
     lines.push(detail_row("port", &cfg.port.to_string(), t().text));
 
     let tls_label = if cfg.tls { "tls:on" } else { "tls:off" };
@@ -717,9 +720,14 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
         })
         .unwrap_or_else(|| "-".into());
 
-    let text = vec![
+    let mut text = vec![
         Line::from(format!("  Name:    {}", project.config.name)),
         Line::from(format!("  Domain:  {}", project.config.domain)),
+    ];
+    for alias in &project.config.aliases {
+        text.push(Line::from(format!("  Alias:   {}", alias)));
+    }
+    text.extend(vec![
         Line::from(format!("  Port:    {}", project.config.port)),
         Line::from(format!(
             "  Type:    {}",
@@ -749,7 +757,7 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
             "  Press Esc or d to close",
             Style::default().fg(t().text_dim),
         )),
-    ];
+    ]);
 
     let popup = Paragraph::new(text)
         .block(make_popup_block("Project Details", t().accent))
@@ -846,6 +854,11 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
             "Domain",
             &form.domain,
             matches!(form.field, AddField::Domain),
+        ),
+        (
+            "Aliases",
+            &form.aliases,
+            matches!(form.field, AddField::Aliases),
         ),
         ("Port", &form.port, matches!(form.field, AddField::Port)),
         (
@@ -977,6 +990,11 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
             "Domain",
             &form.domain,
             matches!(form.field, AddField::Domain),
+        ),
+        (
+            "Aliases",
+            &form.aliases,
+            matches!(form.field, AddField::Aliases),
         ),
         ("Port", &form.port, matches!(form.field, AddField::Port)),
         (

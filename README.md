@@ -174,6 +174,7 @@ Alternative (Cargo-managed install path):
 
 ```bash
 cargo install --path . --force
+strip ~/.cargo/bin/zapusk
 ```
 
 ---

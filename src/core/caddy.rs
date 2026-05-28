@@ -21,13 +21,15 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
     ));
 
     for project in projects {
-        let domain = if project.tls {
-            format!("https://{}", project.domain)
-        } else {
-            format!("http://{}", project.domain)
-        };
+        let scheme = if project.tls { "https://" } else { "http://" };
+        let hosts: Vec<String> = project
+            .all_hostnames()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("{}{}", scheme, h))
+            .collect();
 
-        out.push_str(&format!("{} {{\n", domain));
+        out.push_str(&format!("{} {{\n", hosts.join(", ")));
 
         if project.tls {
             out.push_str("\ttls internal\n");
