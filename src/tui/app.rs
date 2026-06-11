@@ -125,7 +125,7 @@ pub enum AddField {
     Path,
 }
 
-pub const TYPE_OPTIONS: &[&str] = &["phoenix", "symfony", "kirby", "axum"];
+pub const TYPE_OPTIONS: &[&str] = &["phoenix", "symfony", "kirby", "axum", "compose"];
 
 /// State for the inline add-project form
 #[derive(Debug, Clone)]
@@ -1055,6 +1055,9 @@ impl App {
             php_version: None,
             public_dir: None,
             command: None,
+            compose_file: None,
+            service: None,
+            compose_profiles: vec![],
             upstream_host: parse_upstream_host(&form.upstream_host),
             args: vec![],
             env: Default::default(),
@@ -1247,6 +1250,21 @@ impl App {
             },
             public_dir: existing.public_dir,
             command: existing.command,
+            compose_file: if project_type == ProjectType::Compose {
+                existing.compose_file
+            } else {
+                None
+            },
+            service: if project_type == ProjectType::Compose {
+                existing.service
+            } else {
+                None
+            },
+            compose_profiles: if project_type == ProjectType::Compose {
+                existing.compose_profiles
+            } else {
+                vec![]
+            },
             upstream_host: parse_upstream_host(&form.upstream_host),
             args: existing.args,
             env: existing.env,
@@ -1458,6 +1476,9 @@ impl App {
             php_version,
             public_dir: None,
             command,
+            compose_file: None,
+            service: None,
+            compose_profiles: vec![],
             upstream_host: None,
             args,
             env: Default::default(),
@@ -1744,7 +1765,15 @@ async fn verify_project_domain_static(config: &ProjectConfig) -> Result<u16, Str
     let url = format!("{}://{}", scheme, config.domain);
     let mut last_error = String::from("unreachable");
 
-    for _ in 0..8 {
+    // Compose stacks take longer to come up (image pulls, db init) than
+    // native processes — give them a much wider verification window.
+    let attempts = if config.project_type == ProjectType::Compose {
+        40
+    } else {
+        8
+    };
+
+    for _ in 0..attempts {
         let mut cmd = Command::new("curl");
         cmd.arg("-sS")
             .arg("-o")
