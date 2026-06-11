@@ -18,7 +18,7 @@ use core::config::Config;
 use tui::app::App;
 
 #[derive(Parser)]
-#[command(name = "zapusk", about = "Local dev project manager")]
+#[command(name = "zapusk", version, about = "Local dev project manager")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
