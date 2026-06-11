@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::core::config::{ProjectConfig, ProjectType};
+use crate::core::docker::{self, StackRef};
 use crate::core::project::ProjectStatus;
 
 /// Messages sent from background tasks back to the main app
@@ -28,12 +29,36 @@ pub enum ManagerEvent {
     },
 }
 
+/// How a tracked process must be stopped.
+#[derive(Debug, Clone)]
+enum ProcKind {
+    /// Plain child process — signal the PID / process group.
+    Native,
+    /// Compose CLI process (`up` or `logs -f`) — the containers belong to the
+    /// docker daemon, so stopping means `docker compose stop`, never SIGKILL.
+    Compose(StackRef),
+}
+
+#[derive(Debug, Clone)]
+struct Tracked {
+    pid: u32,
+    kind: ProcKind,
+}
+
+fn proc_kind(config: &ProjectConfig) -> ProcKind {
+    if config.project_type == ProjectType::Compose {
+        ProcKind::Compose(StackRef::from_config(config))
+    } else {
+        ProcKind::Native
+    }
+}
+
 /// Manages spawned child processes
 pub struct Manager {
-    /// project name -> pid (spawned by us)
-    spawned: HashMap<String, u32>,
-    /// project name -> pid (adopted external processes)
-    adopted: HashMap<String, u32>,
+    /// project name -> process (spawned by us)
+    spawned: HashMap<String, Tracked>,
+    /// project name -> process (adopted external processes)
+    adopted: HashMap<String, Tracked>,
     pub event_tx: mpsc::Sender<ManagerEvent>,
 }
 
@@ -57,9 +82,28 @@ impl Manager {
 
         // Check if port is already in use — try to adopt the existing process
         if TcpListener::bind(("127.0.0.1", config.port)).is_err() {
+            if config.project_type == ProjectType::Compose {
+                // lsof on a docker-published port returns docker-proxy (Linux)
+                // or Docker Desktop's VM process (macOS) — never adopt or
+                // signal those. Check the compose stack itself instead.
+                if docker::ps_running(config).await {
+                    self.adopt_compose_stack(config).await?;
+                    return Ok(ProjectStatus::Running);
+                }
+                bail!(
+                    "Port {} is already in use by another process. Stop it or change the port in config.",
+                    config.port,
+                );
+            }
             if let Some(pid) = find_port_pid(config.port).await {
                 // Adopt: track this external process
-                self.adopted.insert(config.name.clone(), pid);
+                self.adopted.insert(
+                    config.name.clone(),
+                    Tracked {
+                        pid,
+                        kind: ProcKind::Native,
+                    },
+                );
                 let _ = self
                     .event_tx
                     .send(ManagerEvent::ProcessStarted {
@@ -87,7 +131,11 @@ impl Manager {
             );
         }
 
-        let (bin, args, notes) = if let Some(ref cmd_override) = config.command {
+        let (bin, args, notes) = if config.project_type == ProjectType::Compose {
+            // Foreground `up`: the compose CLI becomes the tracked child, so
+            // log tailing, pidfiles, and exit detection work unchanged.
+            docker::up_command(config).await?
+        } else if let Some(ref cmd_override) = config.command {
             if !config.args.is_empty() {
                 (cmd_override.clone(), config.args.clone(), vec![])
             } else {
@@ -138,20 +186,8 @@ impl Manager {
         let log_dir = log_dir();
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("Could not create log directory {:?}", log_dir))?;
-        let stdout_path = log_path(&config.name);
-        let stdout_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stdout_path)
-            .with_context(|| format!("Could not open log file {:?}", stdout_path))?;
-        let stderr_path = err_log_path(&config.name);
-        let stderr_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stderr_path)
-            .with_context(|| format!("Could not open log file {:?}", stderr_path))?;
+        let stdout_file = open_truncated(&log_path(&config.name))?;
+        let stderr_file = open_truncated(&err_log_path(&config.name))?;
 
         // Log diagnostic notes (e.g. PHP fallback warnings) before attempting spawn
         for note in &notes {
@@ -243,9 +279,88 @@ impl Manager {
             }
         });
 
-        self.spawned.insert(config.name.clone(), pid);
+        self.spawned.insert(
+            config.name.clone(),
+            Tracked {
+                pid,
+                kind: proc_kind(config),
+            },
+        );
 
         Ok(ProjectStatus::Running)
+    }
+
+    /// Re-attach to a compose stack that is already running but has no live
+    /// pidfile (started externally with `docker compose up -d`, or left over
+    /// after zapusk was killed). Spawns `docker compose logs -f` as the
+    /// tracked process so the existing log-tail and exit machinery applies:
+    /// `logs -f` exits when the stack stops.
+    async fn adopt_compose_stack(&mut self, config: &ProjectConfig) -> Result<u32> {
+        let (bin, args) = docker::logs_follow_command(config).await?;
+
+        let log_dir = log_dir();
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("Could not create log directory {:?}", log_dir))?;
+        let stdout_file = open_truncated(&log_path(&config.name))?;
+        let stderr_file = open_truncated(&err_log_path(&config.name))?;
+
+        let mut child = Command::new(&bin)
+            .args(&args)
+            .current_dir(&config.path)
+            .stdout(std::process::Stdio::from(stdout_file))
+            .stderr(std::process::Stdio::from(stderr_file))
+            .process_group(0)
+            .spawn()
+            .with_context(|| format!("could not run '{}': not found or not executable", bin))?;
+
+        let pid = match child.id() {
+            Some(id) => id,
+            None => bail!("Could not determine PID for {}", config.name),
+        };
+        write_pid(&config.name, pid);
+
+        let name = config.name.clone();
+        let tx = self.event_tx.clone();
+        spawn_log_tail(log_path(&name), name.clone(), false, tx.clone());
+        spawn_log_tail(err_log_path(&name), name.clone(), true, tx.clone());
+
+        let tx_exit = tx.clone();
+        let name_exit = name.clone();
+        tokio::spawn(async move {
+            let success = matches!(child.wait().await, Ok(status) if status.success());
+            let _ = tx_exit
+                .send(ManagerEvent::ProcessExited {
+                    project_name: name_exit,
+                    success,
+                })
+                .await;
+        });
+
+        self.adopted.insert(
+            config.name.clone(),
+            Tracked {
+                pid,
+                kind: ProcKind::Compose(StackRef::from_config(config)),
+            },
+        );
+        let _ = self
+            .event_tx
+            .send(ManagerEvent::ProcessStarted {
+                project_name: config.name.clone(),
+                pid,
+                adopted: true,
+            })
+            .await;
+        let _ = self
+            .event_tx
+            .send(ManagerEvent::LogLine {
+                project_name: config.name.clone(),
+                line: "Adopted running compose stack (logs attached)".into(),
+                is_stderr: false,
+            })
+            .await;
+
+        Ok(pid)
     }
 
     /// Poll adopted processes for exit status (non-blocking).
@@ -255,8 +370,8 @@ impl Manager {
 
         // Check adopted processes (via kill(pid, 0) — checks if process exists)
         let mut adopted_exited = vec![];
-        for (name, &pid) in &self.adopted {
-            if !process_exists(pid) {
+        for (name, tracked) in &self.adopted {
+            if !process_exists(tracked.pid) {
                 adopted_exited.push(name.clone());
                 events.push(ManagerEvent::ProcessExited {
                     project_name: name.clone(),
@@ -272,11 +387,17 @@ impl Manager {
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<()> {
-        if let Some(pid) = self.spawned.remove(name) {
-            stop_process(pid, true).await?; // process group
+        if let Some(t) = self.spawned.remove(name) {
+            match &t.kind {
+                ProcKind::Native => stop_process(t.pid, true).await?, // process group
+                ProcKind::Compose(stack) => stop_compose(t.pid, stack, true).await?,
+            }
             remove_pid(name);
-        } else if let Some(pid) = self.adopted.remove(name) {
-            stop_process(pid, false).await?; // single PID
+        } else if let Some(t) = self.adopted.remove(name) {
+            match &t.kind {
+                ProcKind::Native => stop_process(t.pid, false).await?, // single PID
+                ProcKind::Compose(stack) => stop_compose(t.pid, stack, false).await?,
+            }
             remove_pid(name);
         } else {
             bail!("Project {} is not running", name);
@@ -291,7 +412,13 @@ impl Manager {
         // Check pidfile first — process was previously managed by zapusk
         if let Some(pid) = read_pid(&config.name) {
             if process_exists(pid) {
-                self.adopted.insert(config.name.clone(), pid);
+                self.adopted.insert(
+                    config.name.clone(),
+                    Tracked {
+                        pid,
+                        kind: proc_kind(config),
+                    },
+                );
                 let _ = self
                     .event_tx
                     .send(ManagerEvent::ProcessStarted {
@@ -334,13 +461,28 @@ impl Manager {
             }
         }
 
+        // Compose stacks: detect via the compose CLI, not lsof — the PID on a
+        // docker-published port is docker-proxy / Docker Desktop's VM process.
+        if config.project_type == ProjectType::Compose {
+            if docker::ps_running(config).await {
+                return self.adopt_compose_stack(config).await.ok();
+            }
+            return None;
+        }
+
         // Fall back to port-based detection (external processes — no log files)
         if TcpListener::bind(("127.0.0.1", config.port)).is_ok() {
             return None; // Port is free, project is not running
         }
 
         if let Some(pid) = find_port_pid(config.port).await {
-            self.adopted.insert(config.name.clone(), pid);
+            self.adopted.insert(
+                config.name.clone(),
+                Tracked {
+                    pid,
+                    kind: ProcKind::Native,
+                },
+            );
             let _ = self
                 .event_tx
                 .send(ManagerEvent::ProcessStarted {
@@ -361,17 +503,51 @@ impl Manager {
     }
 
     pub async fn stop_all(&mut self) {
-        for (name, pid) in self.spawned.drain() {
-            // Process group kill — no timeout on force quit
-            let target = -(pid as i32);
-            unsafe { libc::kill(target, libc::SIGTERM) };
+        for (name, t) in self.spawned.drain() {
+            match &t.kind {
+                ProcKind::Native => {
+                    // Process group kill — no timeout on force quit
+                    let target = -(t.pid as i32);
+                    unsafe { libc::kill(target, libc::SIGTERM) };
+                }
+                ProcKind::Compose(stack) => {
+                    // Stop the containers via compose, then let the foreground
+                    // `up` process wind down (SIGTERM nudge, never SIGKILL).
+                    let _ = docker::stop_stack(stack, 10).await;
+                    unsafe { libc::kill(-(t.pid as i32), libc::SIGTERM) };
+                }
+            }
             remove_pid(&name);
         }
-        for (name, pid) in self.adopted.drain() {
-            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        for (name, t) in self.adopted.drain() {
+            if let ProcKind::Compose(stack) = &t.kind {
+                let _ = docker::stop_stack(stack, 10).await;
+            }
+            unsafe { libc::kill(t.pid as i32, libc::SIGTERM) };
             remove_pid(&name);
         }
     }
+}
+
+/// Stop a compose stack gracefully, then make sure the tracked compose CLI
+/// process (`up` or `logs -f`) is gone. Never SIGKILLs the group: the
+/// containers belong to the docker daemon and would be orphaned mid-shutdown.
+async fn stop_compose(pid: u32, stack: &StackRef, kill_group: bool) -> Result<()> {
+    let stop_result = docker::stop_stack(stack, 10).await;
+
+    // The compose CLI exits on its own once the containers stop.
+    for _ in 0..50 {
+        if !process_exists(pid) {
+            return stop_result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Still alive (e.g. compose stop failed because docker is gone) — SIGTERM
+    // triggers the compose CLI's own graceful shutdown as a fallback.
+    let target = if kill_group { -(pid as i32) } else { pid as i32 };
+    unsafe { libc::kill(target, libc::SIGTERM) };
+    stop_result
 }
 
 /// Stop a process with SIGTERM, wait up to 3s, then escalate to SIGKILL.
@@ -424,6 +600,15 @@ async fn find_port_pid(port: u16) -> Option<u32> {
 }
 
 // ── Log / PID file helpers ──────────────────────────────────────────────────
+
+fn open_truncated(path: &PathBuf) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("Could not open log file {:?}", path))
+}
 
 fn log_dir() -> PathBuf {
     dirs::home_dir()
