@@ -105,14 +105,17 @@ pub async fn up_command(config: &ProjectConfig) -> Result<(String, Vec<String>, 
     args.push("up".into());
     args.push("--no-color".into());
     args.push("--remove-orphans".into());
-    let mut notes = vec![];
+    // Pull/create/start progress is NOT suppressed: stdout/stderr go to log
+    // files (non-TTY), so compose uses plain line-by-line progress — visible
+    // in the log pane so the user sees that something is happening.
+    let mut notes = vec![
+        "compose: image pulls and container steps appear below (first start may take a while)"
+            .to_string(),
+    ];
     if cli.is_v1 {
         notes.push(
             "using legacy docker-compose v1 (EOL) — install the compose v2 plugin".to_string(),
         );
-    } else {
-        // --quiet-pull avoids carriage-return progress spam in log files (v2 only)
-        args.push("--quiet-pull".into());
     }
     Ok((cli.bin.clone(), args, notes))
 }
@@ -212,10 +215,9 @@ mod tests {
                 "up".into(),
                 "--no-color".into(),
                 "--remove-orphans".into(),
-                "--quiet-pull".into(),
             ]
         );
-        assert!(notes.is_empty());
+        assert_eq!(notes.len(), 1);
 
         let (logs_bin, logs_args) = logs_follow_command(&project).await.unwrap();
         assert_eq!(logs_bin, "docker");
