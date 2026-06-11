@@ -26,6 +26,7 @@ pub async fn run() -> Result<()> {
     step_dnsmasq_config(&tld).await?;
     step_dnsmasq_start().await?;
     step_config(&tld).await?;
+    step_docker().await?;
 
     // Final doctor check
     println!("\n--- Final check ---");
@@ -46,7 +47,7 @@ pub async fn run() -> Result<()> {
 }
 
 async fn step_caddy() -> Result<()> {
-    println!("[1/5] Checking Caddy...");
+    println!("[1/6] Checking Caddy...");
     let check = doctor::check_caddy().await;
     if check.ok {
         println!("      \u{2713} {}", check.detail);
@@ -75,7 +76,7 @@ async fn step_caddy() -> Result<()> {
 }
 
 async fn step_dnsmasq_install() -> Result<()> {
-    println!("\n[2/5] Checking dnsmasq...");
+    println!("\n[2/6] Checking dnsmasq...");
     let check = doctor::check_dnsmasq_installed().await;
     if check.ok {
         println!("      \u{2713} {}", check.detail);
@@ -104,7 +105,7 @@ async fn step_dnsmasq_install() -> Result<()> {
 }
 
 async fn step_dnsmasq_config(tld: &str) -> Result<()> {
-    println!("\n[3/5] Configuring dnsmasq for *.{}...", tld);
+    println!("\n[3/6] Configuring dnsmasq for *.{}...", tld);
     let check = doctor::check_dnsmasq_config(tld).await;
     if check.ok {
         println!("      \u{2713} {}", check.detail);
@@ -243,7 +244,7 @@ async fn ensure_macos_resolver(resolver_file: &str) -> Result<()> {
 }
 
 async fn step_dnsmasq_start() -> Result<()> {
-    println!("\n[4/5] Starting dnsmasq...");
+    println!("\n[4/6] Starting dnsmasq...");
     let check = doctor::check_dnsmasq_running().await;
     if check.ok {
         println!("      \u{2713} {}", check.detail);
@@ -274,7 +275,7 @@ async fn step_dnsmasq_start() -> Result<()> {
 async fn step_config(tld: &str) -> Result<()> {
     let config_file = crate::core::config::config_path();
 
-    println!("\n[5/5] Config file...");
+    println!("\n[5/6] Config file...");
     if config_file.exists() {
         println!("      \u{2713} Found at {}", config_file.display());
     } else {
@@ -313,6 +314,36 @@ async fn step_config(tld: &str) -> Result<()> {
                     Ok(()) => sp.done("Caddyfile written and Caddy reloaded").await,
                     Err(e) => sp.fail(&format!("{}", e)).await,
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Docker is only required for `type = "compose"` projects, so this step is
+/// informational when none are configured. Installing Docker is left to the
+/// user — the step prints per-OS hints instead.
+async fn step_docker() -> Result<()> {
+    println!("\n[6/6] Checking Docker (compose projects)...");
+
+    let has_compose = Config::load()
+        .map(|c| doctor::has_compose_projects(&c))
+        .unwrap_or(false);
+    if !has_compose {
+        println!("      \u{2713} Skipped — no compose projects in config");
+        println!("      (add one with `zapusk add`, type \"compose\", if your team uses Docker)");
+        return Ok(());
+    }
+
+    for check in doctor::check_docker().await {
+        if check.ok {
+            println!("      \u{2713} {}", check.detail);
+        } else {
+            let mark = if check.is_warning { '\u{26a0}' } else { '\u{2717}' };
+            println!("      {} {}", mark, check.detail);
+            if let Some(hint) = &check.fix_hint {
+                println!("      \u{2192} {}", hint);
             }
         }
     }

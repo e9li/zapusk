@@ -97,7 +97,9 @@ This ensures all generated links (assets, media, panel) use the correct scheme a
 
 ### Compose projects (Docker)
 
-A project with `type = "compose"` is started as `docker compose up` (foreground, with `--no-color --quiet-pull --remove-orphans`) in the project directory. The compose CLI is the tracked process: all services' logs stream into the log pane with `service |` prefixes, and stopping the project runs `docker compose stop -t 10` so containers shut down gracefully.
+A project with `type = "compose"` is started as `docker compose up` (foreground, with `--no-color --remove-orphans`) in the project directory. The compose CLI is the tracked process: all services' logs stream into the log pane with `service |` prefixes, and stopping the project runs `docker compose stop -t 10` so containers shut down gracefully.
+
+On first start, image pull progress and container create/start steps are visible in the log pane (compose prints plain line-by-line progress when writing to log files), so long pulls don't look like a hang.
 
 The compose file belongs to the project repo — zapusk never generates or edits it. It is resolved from `compose_file` in the config, or auto-detected (`compose.yaml`, `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`).
 
@@ -152,6 +154,7 @@ src/
 │   ├── manager.rs    # Child process spawning, log file tailing, pidfile tracking
 │   ├── caddy.rs      # Caddyfile generation and `caddy reload`
 │   ├── config.rs     # TOML config deserialization + ProjectType
+│   ├── docker.rs     # docker compose CLI detection + up/ps/logs/stop commands
 │   └── discovery.rs  # Listening-port discovery + stack heuristics
 └── cli/
     ├── doctor.rs     # `zapusk doctor` — dependency checks
@@ -268,27 +271,30 @@ Should be idempotent — safe to re-run to fix a broken setup.
 Welcome to zapusk!
 Let us make sure your local dev stack is ready.
 
-[1/5] Checking Caddy...
+[1/6] Checking Caddy...
       ✓ caddy found (2.8.4)
 
-[2/5] Checking dnsmasq...
+[2/6] Checking dnsmasq...
       ✗ dnsmasq not found
       → Install dnsmasq? [Y/n]
         macOS:  brew install dnsmasq
         Linux:  sudo apt install dnsmasq
       Running: brew install dnsmasq ... done
 
-[3/5] Configuring dnsmasq for *.test...
+[3/6] Configuring dnsmasq for *.test...
       ✓ address=/.test/127.0.0.1 already present
 
-[4/5] Starting dnsmasq...
+[4/6] Starting dnsmasq...
       → Start dnsmasq now? [Y/n]
         Running: brew services start dnsmasq ... done
 
-[5/5] Generating Caddyfile from config...
+[5/6] Generating Caddyfile from config...
       → Config found at ~/.config/zapusk/config.toml
       ✓ Caddyfile written to ~/.config/zapusk/Caddyfile
       → Reload Caddy? [Y/n]  done
+
+[6/6] Checking Docker (compose projects)...
+      ✓ Skipped — no compose projects in config
 
 Setup complete. Run `zapusk` to open the TUI.
 ```
