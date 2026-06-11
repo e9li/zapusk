@@ -34,6 +34,20 @@ type = "axum"
 path = "/home/user/projects/api"
 upstream_host = "127.0.0.1" # optional reverse proxy target host
 
+# Docker-based project: zapusk runs `docker compose up` in the project dir.
+# The compose file belongs to the project repo and should publish the
+# configured port on localhost, e.g.  ports: ["${PORT}:80"]
+[[projects]]
+name = "shop"
+domain = "shop.test"
+port = 8080
+type = "compose"
+path = "/home/user/projects/shop"
+tls = true
+# compose_file = "docker-compose.dev.yml"  # optional, default: auto-detect
+# service = "web"                          # optional: main service name
+# compose_profiles = ["dev"]               # optional: --profile flags
+
 [caddy]
 config_path = "/home/user/.config/zapusk/Caddyfile"
 # caddy_bin = "caddy"  # optional, defaults to "caddy" in PATH

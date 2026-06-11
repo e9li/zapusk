@@ -62,6 +62,15 @@ pub struct ProjectConfig {
     /// Custom command override (bypasses built-in start_command)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Compose file relative to `path` (compose projects only; default: auto-detect)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_file: Option<String>,
+    /// Main service name within the compose stack (compose projects only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Compose profiles passed as --profile flags (compose projects only)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compose_profiles: Vec<String>,
     /// Optional reverse-proxy upstream host override (default: loopback fallback).
     /// Examples: "127.0.0.1", "localhost", "192.168.1.20"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,11 +93,49 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+/// Compose file names probed (in order) when `compose_file` is not set.
+pub const COMPOSE_FILE_CANDIDATES: &[&str] = &[
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+];
+
 impl ProjectConfig {
     /// Iterator over the primary domain and all aliases.
     pub fn all_hostnames(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.domain.as_str())
             .chain(self.aliases.iter().map(String::as_str))
+    }
+
+    /// Resolve the compose file for a compose project: the explicit
+    /// `compose_file` (relative to `path` unless absolute), or the first
+    /// standard compose file name found in the project directory.
+    pub fn resolve_compose_file(&self) -> Result<PathBuf> {
+        let base = std::path::Path::new(&self.path);
+        if let Some(ref file) = self.compose_file {
+            let candidate = std::path::Path::new(file);
+            let full = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base.join(candidate)
+            };
+            if !full.is_file() {
+                anyhow::bail!("compose file not found: {}", full.display());
+            }
+            return Ok(full);
+        }
+        for name in COMPOSE_FILE_CANDIDATES {
+            let candidate = base.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+        anyhow::bail!(
+            "no compose file found in {} (looked for {}); set `compose_file` in config",
+            self.path,
+            COMPOSE_FILE_CANDIDATES.join(", ")
+        )
     }
 }
 
@@ -107,6 +154,7 @@ pub enum ProjectType {
     Symfony,
     Kirby,
     Axum,
+    Compose,
 }
 
 impl ProjectType {
@@ -116,6 +164,7 @@ impl ProjectType {
             ProjectType::Symfony => "symfony",
             ProjectType::Kirby => "kirby",
             ProjectType::Axum => "axum",
+            ProjectType::Compose => "compose",
         }
     }
 
@@ -161,6 +210,13 @@ impl ProjectType {
                 (php_bin, args, notes)
             }
             ProjectType::Axum => ("cargo".into(), vec!["run".into()], vec![]),
+            // Compose projects are normally started via core::docker (compose
+            // CLI detection + resolved compose file); this is a plain fallback.
+            ProjectType::Compose => (
+                "docker".into(),
+                vec!["compose".into(), "up".into(), "--no-color".into()],
+                vec![],
+            ),
         }
     }
 }
@@ -180,8 +236,9 @@ impl FromStr for ProjectType {
             "symfony" => Ok(ProjectType::Symfony),
             "kirby" => Ok(ProjectType::Kirby),
             "axum" => Ok(ProjectType::Axum),
+            "compose" => Ok(ProjectType::Compose),
             other => anyhow::bail!(
-                "Unknown project type: '{}'. Use: phoenix, symfony, kirby, axum",
+                "Unknown project type: '{}'. Use: phoenix, symfony, kirby, axum, compose",
                 other
             ),
         }
@@ -258,4 +315,95 @@ pub fn config_path() -> PathBuf {
         .join(".config")
         .join("zapusk")
         .join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_project(toml_src: &str) -> ProjectConfig {
+        let config: Config = toml::from_str(toml_src).expect("config should parse");
+        config.projects.into_iter().next().expect("one project")
+    }
+
+    #[test]
+    fn parses_compose_project() {
+        let project = parse_project(
+            r#"
+            [[projects]]
+            name = "shop"
+            domain = "shop.test"
+            port = 8080
+            type = "compose"
+            path = "/tmp/shop"
+            compose_file = "docker-compose.dev.yml"
+            service = "web"
+            compose_profiles = ["dev"]
+            "#,
+        );
+        assert_eq!(project.project_type, ProjectType::Compose);
+        assert_eq!(project.compose_file.as_deref(), Some("docker-compose.dev.yml"));
+        assert_eq!(project.service.as_deref(), Some("web"));
+        assert_eq!(project.compose_profiles, vec!["dev"]);
+    }
+
+    #[test]
+    fn parses_legacy_project_without_compose_fields() {
+        let project = parse_project(
+            r#"
+            [[projects]]
+            name = "api"
+            domain = "api.test"
+            port = 3000
+            type = "axum"
+            path = "/tmp/api"
+            "#,
+        );
+        assert_eq!(project.project_type, ProjectType::Axum);
+        assert_eq!(project.compose_file, None);
+        assert_eq!(project.service, None);
+        assert!(project.compose_profiles.is_empty());
+    }
+
+    #[test]
+    fn project_type_from_str_accepts_compose() {
+        assert_eq!(
+            "compose".parse::<ProjectType>().unwrap(),
+            ProjectType::Compose
+        );
+        assert!("docker".parse::<ProjectType>().is_err());
+    }
+
+    #[test]
+    fn resolve_compose_file_auto_detects_and_errors() {
+        let dir = std::env::temp_dir().join(format!("zapusk-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut project = parse_project(&format!(
+            r#"
+            [[projects]]
+            name = "shop"
+            domain = "shop.test"
+            port = 8080
+            type = "compose"
+            path = "{}"
+            "#,
+            dir.display()
+        ));
+
+        // Nothing in the directory -> error mentioning the candidates
+        let err = project.resolve_compose_file().unwrap_err().to_string();
+        assert!(err.contains("compose.yaml"));
+
+        // Auto-detect picks up a standard file name
+        std::fs::write(dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+        let resolved = project.resolve_compose_file().unwrap();
+        assert_eq!(resolved, dir.join("docker-compose.yml"));
+
+        // Explicit compose_file must exist
+        project.compose_file = Some("missing.yml".into());
+        assert!(project.resolve_compose_file().is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
