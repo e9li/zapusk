@@ -18,7 +18,7 @@ pub async fn run() -> Result<()> {
         anyhow::bail!("Port must be between 1 and 65535");
     }
     let project_type: ProjectType =
-        prompt_with_default("Type (phoenix/symfony/kirby/axum)", "phoenix")?
+        prompt_with_default("Type (phoenix/symfony/kirby/axum/compose)", "phoenix")?
             .parse()
             .context("Invalid project type")?;
     let tls = prompt_bool_with_default("Enable TLS (https)", false)?;
@@ -31,6 +31,23 @@ pub async fn run() -> Result<()> {
         Some(prompt_with_default("PHP version", "8.3")?)
     } else {
         None
+    };
+
+    let (compose_file, service) = if project_type == ProjectType::Compose {
+        let file = prompt_with_default("Compose file (relative to project dir)", "auto-detect")?;
+        let compose_file = if file == "auto-detect" {
+            None
+        } else {
+            if !std::path::Path::new(&path).join(&file).is_file() {
+                anyhow::bail!("Compose file not found: {}/{}", path, file);
+            }
+            Some(file)
+        };
+        let service = prompt_with_default("Main service name (optional)", "")?;
+        let service = if service.is_empty() { None } else { Some(service) };
+        (compose_file, service)
+    } else {
+        (None, None)
     };
 
     // Check for duplicates in existing config
@@ -72,6 +89,9 @@ pub async fn run() -> Result<()> {
         php_version,
         public_dir: None,
         command: None,
+        compose_file,
+        service,
+        compose_profiles: vec![],
         upstream_host: None,
         args: vec![],
         env: Default::default(),

@@ -30,6 +30,7 @@ A lightweight terminal UI for managing local development projects. Built with Ru
 | **Symfony** | `symfony server:start` (reads `.php-version` if present) |
 | **Kirby** | PHP built-in server (`php -S`), proxied by Caddy (Homebrew PHP, version per project) |
 | **Axum** | `cargo run` |
+| **Compose** | `docker compose up` (foreground) — the whole stack (app, db, redis, …) runs in containers |
 
 The design is intentionally stack-agnostic — anything that binds to a port can be added as a project type. Caddy proxies it; `zapusk` manages the process.
 
@@ -47,6 +48,8 @@ Those tools are great for team environments and production parity. For solo loca
 | Complexity | high | low |
 
 The trade-off is no container isolation. If that is acceptable for your workflow, this stack is much lighter.
+
+That said, Docker is supported *per project* via `type = "compose"` — useful when team members (e.g. on Linux) don't have native databases or PHP installed. Caddy and dnsmasq stay native; only the project's services run in containers. See [Compose projects](#compose-projects-docker) below.
 
 ---
 
@@ -91,6 +94,38 @@ return [
 ```
 
 This ensures all generated links (assets, media, panel) use the correct scheme and domain.
+
+### Compose projects (Docker)
+
+A project with `type = "compose"` is started as `docker compose up` (foreground, with `--no-color --quiet-pull --remove-orphans`) in the project directory. The compose CLI is the tracked process: all services' logs stream into the log pane with `service |` prefixes, and stopping the project runs `docker compose stop -t 10` so containers shut down gracefully.
+
+The compose file belongs to the project repo — zapusk never generates or edits it. It is resolved from `compose_file` in the config, or auto-detected (`compose.yaml`, `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`).
+
+zapusk exports `PORT` to the compose process, so the recommended convention is to publish the web service's port with interpolation — then the published port always matches the zapusk config:
+
+```yaml
+# compose.yaml (in the project repo)
+services:
+  web:
+    build: .
+    ports:
+      - "${PORT:-8080}:80"
+  db:
+    image: postgres:17
+    volumes:
+      - db-data:/var/lib/postgresql/data
+volumes:
+  db-data:
+```
+
+Caddy proxies `name.test` → `localhost:<port>` exactly like for native projects; `tls` and `aliases` work unchanged.
+
+Notes:
+
+- Works with Docker Desktop, OrbStack, and colima on macOS, and docker engine on Linux — anything that provides the `docker` CLI.
+- Soft quit (`q`) leaves the stack running; on the next launch zapusk re-adopts it. A stack started externally (`docker compose up -d`) is detected and adopted too (logs re-attached via `docker compose logs -f`).
+- `zapusk doctor` checks the docker daemon and compose plugin, but only when compose projects exist in the config.
+- Cold starts (image pulls, db init) get an extended domain-verification window (~100s instead of ~20s).
 
 ---
 
@@ -188,6 +223,7 @@ Should be runnable at any time, not just on first install.
 
 - **System:** caddy binary, dnsmasq installed/running/configured, DNS resolution
 - **PHP:** per-version binary present (only if Kirby projects exist)
+- **Docker:** daemon reachable, compose v2 plugin present (only if compose projects exist)
 - **Projects:** path exists, expected files present, required binaries in PATH
 - **Caddy:** Caddyfile exists, `caddy validate` passes
 
@@ -379,6 +415,17 @@ path = "/home/user/projects/api"
 command = "cargo"         # optional: command override
 args = ["run", "--bin", "api"]
 upstream_host = "127.0.0.1" # optional: override reverse proxy target host
+
+[[projects]]
+name = "shop"
+domain = "shop.test"
+port = 8080                # host port published by the compose stack
+type = "compose"           # runs `docker compose up` in the project dir
+path = "/home/user/projects/shop"
+tls = true
+# compose_file = "docker-compose.dev.yml"  # optional, default: auto-detect
+# service = "web"                          # optional: main service name
+# compose_profiles = ["dev"]               # optional: --profile flags
 
 # if unset, zapusk uses loopback fallback for proxying:
 #   127.0.0.1:<port> first, then [::1]:<port>

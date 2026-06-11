@@ -98,6 +98,26 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Docker checks (only if config has compose projects)
+    if let Some(ref cfg) = config {
+        if has_compose_projects(cfg) {
+            let sp = Spinner::start("Checking Docker...");
+            let results = check_docker().await;
+            sp.clear().await;
+            println!("\nDocker");
+            for r in results {
+                print_check(&r);
+                if !r.ok {
+                    if r.is_warning {
+                        warnings += 1;
+                    } else {
+                        issues += 1;
+                    }
+                }
+            }
+        }
+    }
+
     // Per-project checks
     if let Some(ref cfg) = config {
         let sp = Spinner::start("Checking projects...");
@@ -163,6 +183,13 @@ pub async fn run_quiet() -> Result<bool> {
         for v in &collect_php_versions(cfg) {
             for r in check_php(v).await {
                 if !r.ok {
+                    issues += 1;
+                }
+            }
+        }
+        if has_compose_projects(cfg) {
+            for r in check_docker().await {
+                if !r.ok && !r.is_warning {
                     issues += 1;
                 }
             }
@@ -447,6 +474,91 @@ pub async fn check_php(version: &str) -> Vec<CheckResult> {
     results
 }
 
+// --- Docker checks (compose projects only) ---
+
+pub fn has_compose_projects(config: &Config) -> bool {
+    config
+        .projects
+        .iter()
+        .any(|p| p.project_type == ProjectType::Compose)
+}
+
+pub async fn check_docker() -> Vec<CheckResult> {
+    let mut results = vec![];
+    results.push(check_docker_daemon().await);
+    results.push(check_compose_cli().await);
+    results
+}
+
+async fn check_docker_daemon() -> CheckResult {
+    match Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            CheckResult::pass(format!("docker daemon running (server {})", version))
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+            if stderr.contains("permission denied") {
+                CheckResult::fail(
+                    "docker daemon not accessible (permission denied)",
+                    "run: sudo usermod -aG docker $USER — then log out and back in",
+                )
+            } else {
+                CheckResult::fail(
+                    "docker daemon not running",
+                    if cfg!(target_os = "macos") {
+                        "start Docker Desktop, OrbStack, or colima (e.g. `colima start`)"
+                    } else {
+                        "run: sudo systemctl start docker"
+                    },
+                )
+            }
+        }
+        Err(_) => {
+            // docker CLI missing entirely — check for podman as a hint
+            let podman = Command::new("podman")
+                .arg("--version")
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if podman {
+                CheckResult::fail(
+                    "docker CLI not found (podman detected)",
+                    "install the podman-docker compat package, or install Docker",
+                )
+            } else {
+                CheckResult::fail(
+                    "docker not found",
+                    if cfg!(target_os = "macos") {
+                        "install Docker Desktop or OrbStack (brew install --cask orbstack)"
+                    } else {
+                        "install docker engine: https://docs.docker.com/engine/install/"
+                    },
+                )
+            }
+        }
+    }
+}
+
+async fn check_compose_cli() -> CheckResult {
+    match crate::core::docker::compose_cli().await {
+        Ok(cli) if cli.is_v1 => CheckResult::warn(
+            "docker-compose v1 found (EOL)",
+            "install the compose v2 plugin (`docker-compose-plugin`; ships with Docker Desktop)",
+        ),
+        Ok(_) => CheckResult::pass("docker compose v2 available"),
+        Err(_) => CheckResult::fail(
+            "docker compose not found",
+            "install the compose v2 plugin (ships with Docker Desktop/OrbStack; `docker-compose-plugin` on Linux)",
+        ),
+    }
+}
+
 // --- Per-project checks ---
 
 pub async fn check_project(project: &ProjectConfig) -> CheckResult {
@@ -464,9 +576,22 @@ pub async fn check_project(project: &ProjectConfig) -> CheckResult {
         ProjectType::Symfony => ("composer.json", "symfony"),
         ProjectType::Kirby => ("composer.json", "php"),
         ProjectType::Axum => ("Cargo.toml", "cargo"),
+        ProjectType::Compose => ("", "docker"),
     };
 
-    if !path.join(expected_file).exists() {
+    if project.project_type == ProjectType::Compose {
+        if let Err(e) = project.resolve_compose_file() {
+            return CheckResult::fail(
+                format!(
+                    "{:<14} {} ({})",
+                    project.name,
+                    project.path,
+                    project.project_type.label(),
+                ),
+                e.to_string(),
+            );
+        }
+    } else if !path.join(expected_file).exists() {
         return CheckResult::fail(
             format!(
                 "{:<14} {} ({}) — missing {}",

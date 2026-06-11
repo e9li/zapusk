@@ -1,6 +1,7 @@
 pub mod caddy;
 pub mod config;
 pub mod discovery;
+pub mod docker;
 pub mod manager;
 pub mod project;
 
