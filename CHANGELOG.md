@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First unit tests (config parsing, compose file resolution, compose command
   construction).
 
+### Fixed
+
+- `zapusk --version` / `-V` now works (the version flag was never enabled in
+  the CLI definition).
+
 ## [0.1.6] and earlier
 
 Pre-changelog releases — see the git history. Highlights: Phoenix / Symfony /
