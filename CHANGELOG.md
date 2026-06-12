@@ -5,6 +5,15 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The project list now groups running projects above stopped ones, each group
+  alphabetical by name, with a blank line between the two groups (no group
+  titles). This is display-only: `config.toml` keeps its original order, and
+  `j`/`k` navigation follows the on-screen order.
+
 ## [0.1.7]
 
 ### Added

@@ -323,8 +323,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
 // ── Project list ───────────────────────────────────────────────────────────
 
 fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
+    let projects_title = format!("Projects ({:})", app.projects.len());
     let focused = app.active_pane == ActivePane::ProjectList;
-    let block = make_block("Projects", focused);
+    let block = make_block(&projects_title, focused);
 
     if app.projects.is_empty() {
         let empty = Paragraph::new(vec![
@@ -348,10 +349,28 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .projects
-        .iter()
-        .map(|project| {
+    // Display order groups running projects first, then stopped (see
+    // App::display_order). A blank spacer separates the two groups. Spacers are
+    // extra list rows, so the ratatui selection index is the selected project's
+    // *display* row, not its index in app.projects.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_display = 0usize;
+    let mut prev_running: Option<bool> = None;
+
+    for idx in app.display_order() {
+        let project = &app.projects[idx];
+        let running = project.is_running();
+        if prev_running == Some(true) && !running {
+            // Blank spacer at the running -> stopped boundary.
+            items.push(ListItem::new(Line::from("")));
+        }
+        prev_running = Some(running);
+
+        if idx == app.selected {
+            selected_display = items.len();
+        }
+
+        let item = {
             let startup_phase = app.startup_phase_label(&project.config.name);
             let (status_icon, status_color) = if startup_phase.is_some() {
                 (app.spinner_glyph(), t().warn)
@@ -409,11 +428,12 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
             }
 
             ListItem::new(Line::from(spans))
-        })
-        .collect();
+        };
+        items.push(item);
+    }
 
     let mut state = ListState::default();
-    state.select(Some(app.selected));
+    state.select(Some(selected_display));
 
     let list = List::new(items)
         .block(block)
