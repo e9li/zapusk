@@ -495,6 +495,28 @@ impl App {
         }
     }
 
+    /// Project indices in display order: running projects first, then stopped,
+    /// each group alphabetical by name. This is a view only — `self.projects`
+    /// (and therefore `config.toml`) keeps its original order, since active
+    /// status changes constantly and should not reorder the saved config.
+    pub(crate) fn display_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.projects.len()).collect();
+        order.sort_by(|&a, &b| {
+            let pa = &self.projects[a];
+            let pb = &self.projects[b];
+            // running (false) sorts before stopped (true)
+            (!pa.is_running())
+                .cmp(&!pb.is_running())
+                .then_with(|| {
+                    pa.config
+                        .name
+                        .to_lowercase()
+                        .cmp(&pb.config.name.to_lowercase())
+                })
+        });
+        order
+    }
+
     /// Main event loop tick — call this repeatedly from main
     pub async fn tick(&mut self) -> Result<()> {
         let tick_started = Instant::now();
@@ -736,20 +758,30 @@ impl App {
 
     pub(crate) fn select_next(&mut self) {
         if !self.projects.is_empty() {
-            self.selected = (self.selected + 1) % self.projects.len();
+            self.selected = self.neighbor_in_display_order(1);
             self.log_scroll_offset = 0;
         }
     }
 
     pub(crate) fn select_prev(&mut self) {
         if !self.projects.is_empty() {
-            if self.selected == 0 {
-                self.selected = self.projects.len() - 1;
-            } else {
-                self.selected -= 1;
-            }
+            self.selected = self.neighbor_in_display_order(-1);
             self.log_scroll_offset = 0;
         }
+    }
+
+    /// Step `delta` (+1/-1) through the on-screen (display) order and return the
+    /// resulting `self.projects` index, wrapping around. Keeps j/k navigation
+    /// consistent with the running/stopped grouping shown in the list.
+    fn neighbor_in_display_order(&self, delta: isize) -> usize {
+        let order = self.display_order();
+        let len = order.len();
+        if len == 0 {
+            return self.selected;
+        }
+        let pos = order.iter().position(|&i| i == self.selected).unwrap_or(0);
+        let next = (pos as isize + delta).rem_euclid(len as isize) as usize;
+        order[next]
     }
 
     pub(crate) fn toggle_pane(&mut self) {
@@ -1835,5 +1867,118 @@ fn app_diag_log(message: &str) {
         .open(path)
     {
         let _ = writeln!(file, "[{}] {}", ts, message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(name: &str, port: u16, ptype: ProjectType) -> ProjectConfig {
+        ProjectConfig {
+            name: name.into(),
+            domain: format!("{}.test", name),
+            aliases: vec![],
+            port,
+            project_type: ptype,
+            path: "/tmp".into(),
+            php_version: None,
+            public_dir: None,
+            command: None,
+            compose_file: None,
+            service: None,
+            compose_profiles: vec![],
+            upstream_host: None,
+            args: vec![],
+            env: Default::default(),
+            autostart: false,
+            tls: false,
+        }
+    }
+
+    fn app_with(projects: Vec<ProjectConfig>) -> App {
+        let config = Config {
+            tld: "test".into(),
+            projects,
+            caddy: None,
+            discovery: None,
+            ignored_services: vec![],
+            theme: None,
+        };
+        App::new(config)
+    }
+
+    fn display_names(app: &App) -> Vec<String> {
+        app.display_order()
+            .into_iter()
+            .map(|i| app.projects[i].config.name.clone())
+            .collect()
+    }
+
+    fn set_running(app: &mut App, name: &str, running: bool) {
+        let p = app
+            .projects
+            .iter_mut()
+            .find(|p| p.config.name == name)
+            .unwrap();
+        p.status = if running {
+            ProjectStatus::Running
+        } else {
+            ProjectStatus::Stopped
+        };
+    }
+
+    #[test]
+    fn display_order_groups_running_then_stopped_alphabetically() {
+        let mut app = app_with(vec![
+            project("zeta", 1, ProjectType::Phoenix),
+            project("beta", 2, ProjectType::Axum),
+            project("alpha", 3, ProjectType::Phoenix),
+            project("gamma", 4, ProjectType::Axum),
+        ]);
+        // running: zeta, gamma — stopped: alpha, beta
+        set_running(&mut app, "zeta", true);
+        set_running(&mut app, "gamma", true);
+        set_running(&mut app, "alpha", false);
+        set_running(&mut app, "beta", false);
+
+        // running group first (gamma, zeta), then stopped group (alpha, beta),
+        // each alphabetical by name.
+        assert_eq!(display_names(&app), vec!["gamma", "zeta", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn display_order_does_not_reorder_underlying_vec() {
+        let mut app = app_with(vec![
+            project("zeta", 1, ProjectType::Phoenix),
+            project("beta", 2, ProjectType::Axum),
+        ]);
+        set_running(&mut app, "beta", true);
+
+        // config/Vec order is preserved; only the view is reordered.
+        let vec_order: Vec<_> = app.projects.iter().map(|p| p.config.name.clone()).collect();
+        assert_eq!(vec_order, vec!["zeta", "beta"]);
+        assert_eq!(display_names(&app), vec!["beta", "zeta"]);
+    }
+
+    #[test]
+    fn navigation_follows_display_order() {
+        let mut app = app_with(vec![
+            project("zeta", 1, ProjectType::Phoenix),
+            project("beta", 2, ProjectType::Axum),
+            project("alpha", 3, ProjectType::Phoenix),
+        ]);
+        set_running(&mut app, "zeta", true); // only running one -> top of list
+
+        // Start at the first display row (zeta), then step down twice.
+        let zeta = app.projects.iter().position(|p| p.config.name == "zeta").unwrap();
+        app.selected = zeta;
+        // display order: zeta (running), then alpha, beta (stopped, alphabetical)
+        app.select_next();
+        assert_eq!(app.selected_project().unwrap().config.name, "alpha");
+        app.select_next();
+        assert_eq!(app.selected_project().unwrap().config.name, "beta");
+        app.select_next(); // wraps back to top
+        assert_eq!(app.selected_project().unwrap().config.name, "zeta");
     }
 }

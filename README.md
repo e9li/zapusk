@@ -345,6 +345,11 @@ Project list badges: `[M]` = managed by zapusk, `[A]` = adopted external process
 
 Project list also shows `tls:on` / `tls:off` per project.
 
+The project list groups **running projects above stopped ones**, alphabetically
+by name within each group, with a blank line between the two groups. This is a
+display-only ordering — your `config.toml` keeps its original order, and a
+project moves between groups as you start/stop it (the cursor follows it).
+
 ### Add/Edit form fields
 
 Both Add (`a`) and Edit (`e`) include these fields:
