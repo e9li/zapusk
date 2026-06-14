@@ -27,7 +27,7 @@ A lightweight terminal UI for managing local development projects. Built with Ru
 | Type | How it runs |
 |------|-------------|
 | **Phoenix** | `mix phx.server` |
-| **Symfony** | `symfony server:start` (reads `.php-version` if present) |
+| **Symfony** | `symfony server:start` (PHP version from `php_version`, written to `.php-version`) |
 | **Kirby** | PHP built-in server (`php -S`), proxied by Caddy (Homebrew PHP, version per project) |
 | **Axum** | `cargo run` |
 | **Compose** | `docker compose up` (foreground) — the whole stack (app, db, redis, …) runs in containers |
@@ -77,6 +77,22 @@ when@dev:
 ```
 
 This applies to both Symfony 7 and 8.
+
+### Symfony: PHP version
+
+The Symfony CLI selects the project's PHP version from a `.php-version` file in
+the project root — it has no command-line flag for it. zapusk treats its own
+config as the single source of truth and manages that file for you:
+
+- Set `php_version` on a Symfony project → zapusk writes (or updates)
+  `.php-version` to match before starting, so the configured version is used
+  instead of the system default.
+- Remove `php_version` from the config → zapusk deletes `.php-version` on the
+  next start, so the project falls back to the default PHP.
+
+Because zapusk owns this file, configure the PHP version in `config.toml`, not
+by hand-editing `.php-version` (your edits there are overwritten or removed to
+match the config).
 
 ### Kirby: Caddy static files and base URL
 
@@ -406,7 +422,7 @@ name = "company-site"
 domain = "company.test"
 port = 8001
 type = "kirby"
-php_version = "8.1"        # required for kirby — selects Homebrew PHP version
+php_version = "8.1"        # kirby: selects the Homebrew PHP binary directly
 path = "/home/user/projects/company-site"
 # public_dir = "public"    # optional: document root subfolder (default: "public")
 
@@ -415,6 +431,7 @@ name = "blog"
 domain = "blog.test"
 port = 8002
 type = "symfony"
+php_version = "8.3"        # optional: synced to .php-version for the Symfony CLI
 path = "/home/user/projects/blog"
 
 [[projects]]

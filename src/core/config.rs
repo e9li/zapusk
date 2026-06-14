@@ -54,7 +54,9 @@ pub struct ProjectConfig {
     #[serde(rename = "type")]
     pub project_type: ProjectType,
     pub path: String,
-    /// Only relevant for Kirby projects
+    /// Preferred PHP version. For Kirby projects it selects the `php` binary
+    /// directly; for Symfony projects it drives the `.php-version` file that
+    /// the Symfony CLI reads to pick the runtime PHP version.
     pub php_version: Option<String>,
     /// Document root subfolder for Kirby projects (default: "public")
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +141,69 @@ impl ProjectConfig {
     }
 }
 
+/// Make a Symfony project's `.php-version` file match its zapusk `php_version`
+/// config, so the Symfony CLI runs the project under the intended PHP.
+///
+/// The Symfony CLI picks the PHP version solely from a `.php-version` file in
+/// the project root (there is no command-line flag). zapusk treats its own
+/// config as the single source of truth and manages that file accordingly:
+/// when `php_version` is set, the file is written (or overwritten) to match;
+/// when it is unset, any existing `.php-version` is removed so the project
+/// falls back to the default PHP. Returns diagnostic notes.
+pub fn ensure_symfony_php_version(config: &ProjectConfig) -> Vec<String> {
+    if config.project_type != ProjectType::Symfony {
+        return vec![];
+    }
+
+    let path = std::path::Path::new(&config.path).join(".php-version");
+    let existing = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    let version = config
+        .php_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    match version {
+        Some(version) => {
+            if existing.as_deref() == Some(version) {
+                return vec![];
+            }
+            match std::fs::write(&path, format!("{}\n", version)) {
+                Ok(()) => vec![format!(
+                    "PHP version {} (wrote .php-version from config)",
+                    version
+                )],
+                Err(e) => vec![format!(
+                    "could not write {} from configured php_version ({}): {}",
+                    path.display(),
+                    version,
+                    e
+                )],
+            }
+        }
+        None => {
+            // No version configured: remove a managed `.php-version` so the
+            // project uses the default PHP instead of a stale pin.
+            if existing.is_none() {
+                return vec![];
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => vec![
+                    "removed .php-version (no php_version set in config)".to_string(),
+                ],
+                Err(e) => vec![format!(
+                    "could not remove {} (no php_version in config): {}",
+                    path.display(),
+                    e
+                )],
+            }
+        }
+    }
+}
+
 /// Parse a comma-separated alias string from user input into a clean Vec.
 pub fn parse_aliases(raw: &str) -> Vec<String> {
     raw.split(',')
@@ -175,20 +240,22 @@ impl ProjectType {
         match self {
             ProjectType::Phoenix => ("mix".into(), vec!["phx.server".into()], vec![]),
             ProjectType::Symfony => {
-                let mut args = vec![
+                let args = vec![
                     "server:start".into(),
                     "--no-tls".into(),
                     "--port".into(),
                     config.port.to_string(),
                 ];
                 let mut notes = vec![];
-                // Read .php-version from project dir if present
+                // The Symfony CLI selects the PHP version from a `.php-version`
+                // file in the project root (it has no command-line flag for it).
+                // `ensure_symfony_php_version` keeps that file in sync with the
+                // configured `php_version` before we get here; this only reports
+                // the effective version for the log.
                 let php_version_path = std::path::Path::new(&config.path).join(".php-version");
                 if let Ok(version) = std::fs::read_to_string(&php_version_path) {
                     let version = version.trim().to_string();
                     if !version.is_empty() {
-                        args.push("--php-version".into());
-                        args.push(version.clone());
                         notes.push(format!("PHP version {} (from .php-version)", version));
                     }
                 }
@@ -403,6 +470,67 @@ mod tests {
         // Explicit compose_file must exist
         project.compose_file = Some("missing.yml".into());
         assert!(project.resolve_compose_file().is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ensure_symfony_php_version_manages_file_from_config() {
+        let dir = std::env::temp_dir().join(format!("zapusk-php-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let php_version_path = dir.join(".php-version");
+
+        let mut project = parse_project(&format!(
+            r#"
+            [[projects]]
+            name = "intranet"
+            domain = "intranet.test"
+            port = 8120
+            type = "symfony"
+            path = "{}"
+            php_version = "8.3"
+            "#,
+            dir.display()
+        ));
+
+        // Missing file -> written from config, with a note.
+        let notes = ensure_symfony_php_version(&project);
+        assert_eq!(
+            std::fs::read_to_string(&php_version_path).unwrap().trim(),
+            "8.3"
+        );
+        assert!(notes.iter().any(|n| n.contains("wrote .php-version")));
+
+        // Matching file -> no-op, no notes.
+        assert!(ensure_symfony_php_version(&project).is_empty());
+
+        // Differing file -> overwritten so config stays authoritative.
+        std::fs::write(&php_version_path, "8.4\n").unwrap();
+        let notes = ensure_symfony_php_version(&project);
+        assert_eq!(
+            std::fs::read_to_string(&php_version_path).unwrap().trim(),
+            "8.3"
+        );
+        assert!(notes.iter().any(|n| n.contains("wrote .php-version")));
+
+        // php_version cleared -> existing file removed.
+        project.php_version = None;
+        let notes = ensure_symfony_php_version(&project);
+        assert!(!php_version_path.exists());
+        assert!(notes.iter().any(|n| n.contains("removed .php-version")));
+
+        // No config and no file -> no-op.
+        assert!(ensure_symfony_php_version(&project).is_empty());
+
+        // Non-Symfony projects are ignored entirely (file left alone).
+        std::fs::write(&php_version_path, "8.4\n").unwrap();
+        let mut kirby = project.clone();
+        kirby.project_type = ProjectType::Kirby;
+        assert!(ensure_symfony_php_version(&kirby).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&php_version_path).unwrap().trim(),
+            "8.4"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

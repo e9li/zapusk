@@ -5,6 +5,20 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9]
+
+### Fixed
+
+- Symfony projects now honor the `php_version` set in `config.toml`. The Symfony
+  CLI only picks a PHP version from a `.php-version` file in the project root, so
+  zapusk manages that file from its own config (the single source of truth)
+  before starting: when `php_version` is set, `.php-version` is written/updated
+  to match; when it is unset, an existing `.php-version` is removed so the
+  project falls back to the default PHP. This fixes both a project running the
+  system default instead of the configured version, and a stale pin lingering
+  after `php_version` is removed. Also removed an unsupported `--php-version`
+  flag that was being passed to `symfony server:start`.
+
 ## [0.1.8]
 
 ### Changed
