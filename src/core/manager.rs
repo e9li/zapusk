@@ -131,7 +131,12 @@ impl Manager {
             );
         }
 
-        let (bin, args, notes) = if config.project_type == ProjectType::Compose {
+        // Sync `.php-version` from config for Symfony before building the start
+        // command, so the Symfony CLI (which reads that file) uses the intended
+        // PHP version. Returns diagnostic notes appended below.
+        let php_version_notes = crate::core::config::ensure_symfony_php_version(config);
+
+        let (bin, args, mut notes) = if config.project_type == ProjectType::Compose {
             // Foreground `up`: the compose CLI becomes the tracked child, so
             // log tailing, pidfiles, and exit detection work unchanged.
             docker::up_command(config).await?
@@ -155,6 +160,7 @@ impl Manager {
             }
             config.project_type.start_command(config)
         };
+        notes.extend(php_version_notes);
 
         if bin.trim().is_empty() {
             bail!("Empty command override for {}", config.name);
