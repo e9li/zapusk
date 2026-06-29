@@ -1,6 +1,6 @@
 [package]
 name = "zapusk"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 
 [[bin]]
@@ -9,7 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.30"
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"

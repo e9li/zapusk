@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Local;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
@@ -40,7 +40,7 @@ pub enum StartupPhase {
 }
 
 #[derive(Debug)]
-enum BackgroundEvent {
+pub(crate) enum BackgroundEvent {
     UnmanagedRefreshed(Result<Vec<ServiceInfo>, String>),
     ServiceStatesRefreshed {
         caddy: ServiceState,
@@ -445,9 +445,19 @@ pub struct App {
     discovery_refresh_in_flight: bool,
     service_refresh_in_flight: bool,
     app_event_tx: mpsc::Sender<BackgroundEvent>,
-    app_event_rx: mpsc::Receiver<BackgroundEvent>,
+    /// Taken out of `App` once, into the run loop, via `take_receivers()`.
+    app_event_rx: Option<mpsc::Receiver<BackgroundEvent>>,
     pub(crate) manager: Manager,
-    pub(crate) event_rx: mpsc::Receiver<ManagerEvent>,
+    /// Taken out of `App` once, into the run loop, via `take_receivers()`.
+    event_rx: Option<mpsc::Receiver<ManagerEvent>>,
+}
+
+/// The two channel receivers, handed from `App` to the main run loop so that
+/// `tokio::select!` can await them independently of the `&mut App` the event
+/// handlers need. See `App::take_receivers`.
+pub(crate) struct AppReceivers {
+    pub(crate) manager_rx: mpsc::Receiver<ManagerEvent>,
+    pub(crate) background_rx: mpsc::Receiver<BackgroundEvent>,
 }
 
 impl App {
@@ -489,9 +499,9 @@ impl App {
             discovery_refresh_in_flight: false,
             service_refresh_in_flight: false,
             app_event_tx,
-            app_event_rx,
+            app_event_rx: Some(app_event_rx),
             manager: Manager::new(tx),
-            event_rx: rx,
+            event_rx: Some(rx),
         }
     }
 
@@ -517,46 +527,75 @@ impl App {
         order
     }
 
-    /// Main event loop tick — call this repeatedly from main
-    pub async fn tick(&mut self) -> Result<()> {
-        let tick_started = Instant::now();
-        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+    /// Hand the manager + background channel receivers to the run loop. Called
+    /// exactly once at startup; panics if called twice.
+    pub(crate) fn take_receivers(&mut self) -> AppReceivers {
+        AppReceivers {
+            manager_rx: self.event_rx.take().expect("event_rx already taken"),
+            background_rx: self
+                .app_event_rx
+                .take()
+                .expect("app_event_rx already taken"),
+        }
+    }
 
-        // Poll child processes for exit (non-blocking)
+    /// Drain everything currently queued on both channels without awaiting, so a
+    /// burst of events (e.g. many log lines) coalesces into a single redraw.
+    /// Returns true if any event was processed.
+    pub(crate) fn drain_pending(&mut self, rx: &mut AppReceivers) -> bool {
+        let mut changed = false;
+        while let Ok(event) = rx.manager_rx.try_recv() {
+            self.handle_manager_event(event);
+            changed = true;
+        }
+        while let Ok(event) = rx.background_rx.try_recv() {
+            self.handle_background_event(event);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Periodic housekeeping run on the interval tick: detect adopted-process
+    /// exits, kick off background refreshes, and advance the spinner only while
+    /// something is animating. Returns true if visible state changed (so the
+    /// run loop knows whether a redraw is warranted).
+    pub(crate) fn housekeeping_tick(&mut self) -> bool {
+        let mut changed = false;
+
+        // Adopted processes have no exit channel, so poll for their exit here.
         for event in self.manager.poll_exits() {
             self.handle_manager_event(event);
-        }
-
-        // Drain manager events (non-blocking)
-        while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_manager_event(event);
-        }
-
-        // Drain app background events (non-blocking)
-        while let Ok(event) = self.app_event_rx.try_recv() {
-            self.handle_background_event(event);
+            changed = true;
         }
 
         self.schedule_background_refreshes();
 
-        // Handle keyboard input (100ms timeout so we don't busy-loop)
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Always handle Ctrl+C
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.quit().await;
-                    return Ok(());
-                }
-                self.handle_key(key).await?;
-            }
+        if self.spinner_active() {
+            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+            changed = true;
         }
 
-        let elapsed = tick_started.elapsed();
-        if elapsed > Duration::from_millis(250) {
-            app_diag_log(&format!("slow tick: {}ms", elapsed.as_millis()));
-        }
+        changed
+    }
 
-        Ok(())
+    /// True when any project is Starting or has an active startup phase — the
+    /// only states that render an animated spinner (see `ui::draw_project_list`).
+    fn spinner_active(&self) -> bool {
+        !self.startup_phases.is_empty()
+            || self
+                .projects
+                .iter()
+                .any(|p| matches!(p.status, ProjectStatus::Starting))
+    }
+
+    /// Dispatch a key event: Ctrl+C always quits; everything else is handled by
+    /// `handle_key`.
+    pub(crate) async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit().await;
+            return Ok(());
+        }
+        self.handle_key(key).await
     }
 
     fn schedule_background_refreshes(&mut self) {
@@ -592,7 +631,7 @@ impl App {
         }
     }
 
-    fn handle_background_event(&mut self, event: BackgroundEvent) {
+    pub(crate) fn handle_background_event(&mut self, event: BackgroundEvent) {
         match event {
             BackgroundEvent::UnmanagedRefreshed(result) => {
                 self.discovery_refresh_in_flight = false;
@@ -667,7 +706,7 @@ impl App {
         FRAMES[self.spinner_frame % FRAMES.len()]
     }
 
-    fn handle_manager_event(&mut self, event: ManagerEvent) {
+    pub(crate) fn handle_manager_event(&mut self, event: ManagerEvent) {
         match event {
             ManagerEvent::LogLine {
                 project_name,
