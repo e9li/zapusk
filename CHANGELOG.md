@@ -5,6 +5,19 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10]
+
+### Fixed
+
+- High idle CPU usage (~13–20%, even with no projects running and no traffic).
+  The TUI redrew the entire screen on a fixed ~10×/second cadence whether or not
+  anything had changed, and polled the keyboard with a blocking call inside the
+  async runtime. The render loop is now event-driven (crossterm `EventStream`
+  plus `tokio::select!`): it parks until there is actual terminal input, new log
+  output, a process/state change, or an animation frame, and coalesces bursts
+  into a single redraw. The spinner now advances only while a project is
+  starting, rather than on every frame. Idle CPU drops to roughly 0.5–3%.
+
 ## [0.1.9]
 
 ### Fixed

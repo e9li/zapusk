@@ -6,13 +6,17 @@ mod tui;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
+    event::{Event, EventStream},
     execute,
     terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
     },
 };
+use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
+use std::time::Duration;
+use tokio::time::{self, MissedTickBehavior};
 
 use core::config::Config;
 use tui::app::App;
@@ -100,14 +104,68 @@ async fn run_tui() -> Result<()> {
 }
 
 async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
-    loop {
-        terminal.draw(|frame| tui::ui::draw(frame, app))?;
+    // Own the channel receivers locally so `tokio::select!` can await them
+    // independently of the `&mut app` the event handlers need.
+    let mut rx = app.take_receivers();
 
-        app.tick().await?;
+    // Async terminal-input stream (replaces the old blocking event::poll/read).
+    let mut input = EventStream::new();
+
+    // Housekeeping cadence: adopted-process exit polling, background-refresh
+    // scheduling, and spinner animation. Delay (not Burst) so a slow handler
+    // can't trigger a catch-up flurry of ticks.
+    let mut housekeeping = time::interval(Duration::from_millis(100));
+    housekeeping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    // Initial paint, before we ever await, so the UI shows immediately.
+    terminal.draw(|frame| tui::ui::draw(frame, app))?;
+
+    loop {
+        // Park until exactly one wake source fires, then decide if we redraw.
+        let mut needs_redraw = tokio::select! {
+            maybe_event = input.next() => match maybe_event {
+                Some(Ok(Event::Key(key))) => {
+                    app.handle_key_event(key).await?;
+                    true
+                }
+                // Resize must redraw: with conditional redraws we no longer
+                // repaint every frame, so an idle resize would otherwise leave
+                // a stale/garbled frame.
+                Some(Ok(Event::Resize(_, _))) => true,
+                // Mouse / paste / focus events: not handled, no redraw.
+                Some(Ok(_)) => false,
+                // Input read error — surface it like the old event::read()?.
+                Some(Err(e)) => return Err(e.into()),
+                // stdin closed: exit cleanly.
+                None => {
+                    app.should_quit = true;
+                    false
+                }
+            },
+            Some(event) = rx.manager_rx.recv() => {
+                app.handle_manager_event(event);
+                true
+            }
+            Some(event) = rx.background_rx.recv() => {
+                app.handle_background_event(event);
+                true
+            }
+            _ = housekeeping.tick() => app.housekeeping_tick(),
+        };
+
+        // Coalesce: drain anything else already queued before a single draw.
+        if app.drain_pending(&mut rx) {
+            needs_redraw = true;
+        }
 
         if app.should_quit {
             break;
         }
+
+        if needs_redraw {
+            terminal.draw(|frame| tui::ui::draw(frame, app))?;
+        }
     }
+
     Ok(())
 }
