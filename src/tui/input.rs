@@ -169,6 +169,33 @@ impl App {
             return Ok(());
         }
 
+        // Language picker
+        if self.show_language_popup {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('l') => {
+                    self.show_language_popup = false;
+                    self.status_message = Some(self.tr(Msg::Cancelled).into());
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.select_language_next(),
+                KeyCode::Up | KeyCode::Char('k') => self.select_language_prev(),
+                KeyCode::Enter => self.apply_language_selection(),
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Theme picker
+        if self.show_theme_popup {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('t') => self.cancel_theme_picker(),
+                KeyCode::Down | KeyCode::Char('j') => self.select_theme_next(),
+                KeyCode::Up | KeyCode::Char('k') => self.select_theme_prev(),
+                KeyCode::Enter => self.apply_theme_selection(),
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Help popup
         if self.show_help {
             match key.code {
@@ -272,8 +299,11 @@ impl App {
             // Remove project
             KeyCode::Char('D') | KeyCode::Delete => self.confirm_remove_selected(),
 
-            // Language
-            KeyCode::Char('l') => self.cycle_language(),
+            // Language picker
+            KeyCode::Char('l') => self.open_language_picker(),
+
+            // Theme picker
+            KeyCode::Char('t') => self.open_theme_picker(),
 
             // Help
             KeyCode::Char('?') => {

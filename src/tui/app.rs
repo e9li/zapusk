@@ -11,7 +11,8 @@ use tokio::time::timeout;
 
 use crate::core::caddy;
 use crate::core::config::{
-    Config, IgnoredService, ProjectConfig, config_path, hash_config_bytes, parse_aliases,
+    Config, IgnoredService, ProjectConfig, ThemeConfig, config_path, hash_config_bytes,
+    parse_aliases,
 };
 use crate::core::discovery::ServiceInfo;
 use crate::core::discovery::discover_services;
@@ -19,6 +20,7 @@ use crate::core::framework::{FrameworkId, FrameworkRegistry};
 use crate::core::manager::{Manager, ManagerEvent};
 use crate::core::project::{LogEntry, ProcessOrigin, Project, ProjectStatus};
 use crate::i18n::{Language, Msg, fill};
+use crate::tui::theme::{ThemeMeta, discover_themes};
 
 /// Which pane is focused
 #[derive(Debug, Clone, PartialEq)]
@@ -450,6 +452,13 @@ pub struct App {
     pub confirm_dialog: Option<ConfirmDialog>,
     /// Show help popup
     pub show_help: bool,
+    /// Language picker popup
+    pub show_language_popup: bool,
+    pub language_selected: usize,
+    /// Theme picker popup
+    pub show_theme_popup: bool,
+    pub theme_selected: usize,
+    pub theme_choices: Vec<ThemeMeta>,
     /// Inline add-project form
     pub add_form: Option<AddForm>,
     /// Inline edit-project form
@@ -515,6 +524,11 @@ impl App {
             show_detail_popup: false,
             confirm_dialog: None,
             show_help: false,
+            show_language_popup: false,
+            language_selected: 0,
+            show_theme_popup: false,
+            theme_selected: 0,
+            theme_choices: vec![],
             add_form: None,
             edit_form: None,
             unmanaged_all_services: vec![],
@@ -564,8 +578,38 @@ impl App {
         }
     }
 
-    pub(crate) fn cycle_language(&mut self) {
-        self.lang = self.lang.next();
+    pub(crate) fn open_language_picker(&mut self) {
+        self.language_selected = Language::ALL
+            .iter()
+            .position(|l| *l == self.lang)
+            .unwrap_or(0);
+        self.show_language_popup = true;
+    }
+
+    pub(crate) fn select_language_next(&mut self) {
+        let n = Language::ALL.len();
+        self.language_selected = (self.language_selected + 1) % n;
+    }
+
+    pub(crate) fn select_language_prev(&mut self) {
+        let n = Language::ALL.len();
+        self.language_selected = if self.language_selected == 0 {
+            n - 1
+        } else {
+            self.language_selected - 1
+        };
+    }
+
+    pub(crate) fn apply_language_selection(&mut self) {
+        let Some(lang) = Language::ALL.get(self.language_selected).copied() else {
+            self.show_language_popup = false;
+            return;
+        };
+        self.show_language_popup = false;
+        if lang == self.lang {
+            return;
+        }
+        self.lang = lang;
         self.config.language = Some(self.lang);
         if let Err(e) = self.save_config() {
             self.status_message = Some(self.trf(Msg::SaveFailed, &[("error", &e.to_string())]));
@@ -573,6 +617,94 @@ impl App {
         }
         self.status_message =
             Some(self.trf(Msg::LanguageSet, &[("lang", self.lang.native_name())]));
+    }
+
+    pub(crate) fn current_theme_id(&self) -> String {
+        self.config
+            .theme
+            .as_ref()
+            .and_then(|t| t.name.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_else(|| "groknight".into())
+    }
+
+    pub(crate) fn open_theme_picker(&mut self) {
+        self.theme_choices = discover_themes();
+        let current = self.current_theme_id();
+        self.theme_selected = self
+            .theme_choices
+            .iter()
+            .position(|t| t.id == current)
+            .unwrap_or(0);
+        self.show_theme_popup = true;
+        self.preview_theme_at_cursor();
+    }
+
+    pub(crate) fn select_theme_next(&mut self) {
+        let n = self.theme_choices.len();
+        if n == 0 {
+            return;
+        }
+        self.theme_selected = (self.theme_selected + 1) % n;
+        self.preview_theme_at_cursor();
+    }
+
+    pub(crate) fn select_theme_prev(&mut self) {
+        let n = self.theme_choices.len();
+        if n == 0 {
+            return;
+        }
+        self.theme_selected = if self.theme_selected == 0 {
+            n - 1
+        } else {
+            self.theme_selected - 1
+        };
+        self.preview_theme_at_cursor();
+    }
+
+    fn preview_theme_at_cursor(&mut self) {
+        let Some(choice) = self.theme_choices.get(self.theme_selected) else {
+            return;
+        };
+        let mut preview = self
+            .config
+            .theme
+            .clone()
+            .unwrap_or_else(ThemeConfig::default);
+        preview.name = Some(choice.id.clone());
+        crate::tui::ui::init_theme(Some(&preview));
+    }
+
+    pub(crate) fn cancel_theme_picker(&mut self) {
+        self.show_theme_popup = false;
+        crate::tui::ui::init_theme(self.config.theme.as_ref());
+        self.status_message = Some(self.tr(Msg::Cancelled).into());
+    }
+
+    pub(crate) fn apply_theme_selection(&mut self) {
+        let Some(choice) = self.theme_choices.get(self.theme_selected).cloned() else {
+            self.cancel_theme_picker();
+            return;
+        };
+        self.show_theme_popup = false;
+        if choice.id == self.current_theme_id() {
+            crate::tui::ui::init_theme(self.config.theme.as_ref());
+            return;
+        }
+        let previous = self.config.theme.clone();
+        let mut theme = previous.clone().unwrap_or_else(ThemeConfig::default);
+        theme.name = Some(choice.id.clone());
+        self.config.theme = Some(theme);
+        crate::tui::ui::init_theme(self.config.theme.as_ref());
+        if let Err(e) = self.save_config() {
+            self.config.theme = previous;
+            crate::tui::ui::init_theme(self.config.theme.as_ref());
+            self.status_message = Some(self.trf(Msg::SaveFailed, &[("error", &e.to_string())]));
+            return;
+        }
+        self.status_message = Some(self.trf(Msg::ThemeSet, &[("name", &choice.label)]));
     }
 
     /// Project indices in display order: running projects first, then stopped,
@@ -1772,7 +1904,12 @@ impl App {
     }
 
     async fn poll_config_reload(&mut self) -> bool {
-        if self.add_form.is_some() || self.edit_form.is_some() || self.confirm_dialog.is_some() {
+        if self.add_form.is_some()
+            || self.edit_form.is_some()
+            || self.confirm_dialog.is_some()
+            || self.show_language_popup
+            || self.show_theme_popup
+        {
             return false;
         }
         if self.last_config_poll.elapsed() < Duration::from_millis(500) {
@@ -2291,6 +2428,51 @@ mod tests {
         assert_eq!(app.selected_project().unwrap().config.name, "beta");
         app.select_next(); // wraps back to top
         assert_eq!(app.selected_project().unwrap().config.name, "zeta");
+    }
+
+    #[test]
+    fn language_picker_starts_on_current_language() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        app.lang = Language::It;
+        app.open_language_picker();
+        assert!(app.show_language_popup);
+        assert_eq!(Language::ALL[app.language_selected], Language::It);
+        app.select_language_next();
+        assert_eq!(Language::ALL[app.language_selected], Language::Sr);
+        app.select_language_prev();
+        assert_eq!(Language::ALL[app.language_selected], Language::It);
+    }
+
+    #[test]
+    fn theme_picker_starts_on_current_theme() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        app.config.theme = Some(ThemeConfig {
+            name: Some("terminal".into()),
+            ..ThemeConfig::default()
+        });
+        app.open_theme_picker();
+        assert!(app.show_theme_popup);
+        assert_eq!(app.theme_choices[app.theme_selected].id, "terminal");
+        app.select_theme_next();
+        assert_ne!(app.theme_choices[app.theme_selected].id, "terminal");
+        app.select_theme_prev();
+        assert_eq!(app.theme_choices[app.theme_selected].id, "terminal");
+    }
+
+    #[test]
+    fn theme_picker_preview_does_not_write_config_until_enter() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        app.config.theme = Some(ThemeConfig {
+            name: Some("terminal".into()),
+            ..ThemeConfig::default()
+        });
+        app.open_theme_picker();
+        let before = app.config.theme.clone();
+        app.select_theme_next();
+        assert_eq!(app.config.theme, before);
+        app.cancel_theme_picker();
+        assert!(!app.show_theme_popup);
+        assert_eq!(app.current_theme_id(), "terminal");
     }
 
     fn config_from(projects: Vec<ProjectConfig>) -> Config {

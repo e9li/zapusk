@@ -1,0 +1,14 @@
+# Catppuccin Mocha — official dark flavor (https://catppuccin.com/palette/).
+id = "catppuccin"
+label = "Catppuccin"
+
+bg            = "#1e1e2e"
+border        = "#45475a"
+border_focus  = "#cba6f7"
+text          = "#cdd6f4"
+text_dim      = "#6c7086"
+accent        = "#cba6f7"
+ok            = "#a6e3a1"
+warn          = "#f9e2af"
+err           = "#f38ba8"
+highlight_bg  = "#313244"

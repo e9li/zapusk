@@ -70,16 +70,20 @@ web_ports = ["80", "443", "8080", "8443", "3000-9999"]
 # command = "pnpm"
 # args = ["dev", "--port", "5173"]
 
-# Optional: override TUI colors. Values are hex strings (#rrggbb) or named
-# terminal colors (red, green, cyan, white, darkgray, lightgreen, …).
-# All fields are optional — omit to keep the default.
+# Color theme. `name` is groknight (default), terminal, nightfox, catppuccin,
+# macintosh, macintosh-dark, or a file in ~/.config/zapusk/themes/<id>.toml.
+# Remaining keys optionally override that theme. Values: #rrggbb, ANSI names
+# (red, green, cyan, white, darkgray, …), or `reset` for the terminal default.
 # [theme]
-# border        = "#3c3c50"  # unfocused pane borders
-# border_focus  = "#96c832"  # focused pane border (lime green)
-# text          = "#c8c8d2"  # primary text
-# text_dim      = "#646478"  # timestamps, labels, key hints
-# accent        = "#78b4dc"  # project type, port numbers
-# ok            = "#64c864"  # running status, managed badge
-# warn          = "#dcb43c"  # warnings, adopted badge, stderr lines
-# err           = "#dc5a5a"  # errors, failed status
-# highlight_bg  = "#282837"  # selected-item background
+# name          = "groknight"
+# bg            = "#141414"  # application canvas
+# border        = "#414141"  # unfocused pane borders
+# border_focus  = "#bb9af7"  # focused pane
+# text          = "#e1e1e1"  # primary text
+# text_dim      = "#6c6c6c"  # timestamps, labels, key hints
+# accent        = "#bb9af7"  # titles, project type
+# ok            = "#9ece6a"  # running status, managed badge
+# warn          = "#e0af68"  # warnings, adopted badge, stderr
+# err           = "#f7768e"  # errors, failed status
+# highlight_bg  = "#242424"  # selected-item background
+# highlight_fg  = "#e1e1e1"  # selected-item text (omit to use `text`)
