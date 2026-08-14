@@ -455,6 +455,8 @@ pub struct App {
     /// Language picker popup
     pub show_language_popup: bool,
     pub language_selected: usize,
+    /// Committed language while the picker is open (preview uses `lang`).
+    language_revert: Option<Language>,
     /// Theme picker popup
     pub show_theme_popup: bool,
     pub theme_selected: usize,
@@ -526,6 +528,7 @@ impl App {
             show_help: false,
             show_language_popup: false,
             language_selected: 0,
+            language_revert: None,
             show_theme_popup: false,
             theme_selected: 0,
             theme_choices: vec![],
@@ -583,12 +586,15 @@ impl App {
             .iter()
             .position(|l| *l == self.lang)
             .unwrap_or(0);
+        self.language_revert = Some(self.lang);
         self.show_language_popup = true;
+        self.preview_language_at_cursor();
     }
 
     pub(crate) fn select_language_next(&mut self) {
         let n = Language::ALL.len();
         self.language_selected = (self.language_selected + 1) % n;
+        self.preview_language_at_cursor();
     }
 
     pub(crate) fn select_language_prev(&mut self) {
@@ -598,20 +604,43 @@ impl App {
         } else {
             self.language_selected - 1
         };
+        self.preview_language_at_cursor();
+    }
+
+    fn preview_language_at_cursor(&mut self) {
+        if let Some(lang) = Language::ALL.get(self.language_selected).copied() {
+            self.lang = lang;
+        }
+    }
+
+    pub(crate) fn saved_language(&self) -> Language {
+        self.language_revert.unwrap_or(self.lang)
+    }
+
+    pub(crate) fn cancel_language_picker(&mut self) {
+        if let Some(lang) = self.language_revert.take() {
+            self.lang = lang;
+        }
+        self.show_language_popup = false;
+        self.status_message = Some(self.tr(Msg::Cancelled).into());
     }
 
     pub(crate) fn apply_language_selection(&mut self) {
         let Some(lang) = Language::ALL.get(self.language_selected).copied() else {
-            self.show_language_popup = false;
+            self.cancel_language_picker();
             return;
         };
+        let previous = self.language_revert.take().unwrap_or(self.lang);
+        let previous_cfg = self.config.language;
         self.show_language_popup = false;
-        if lang == self.lang {
+        self.lang = lang;
+        if lang == previous {
             return;
         }
-        self.lang = lang;
         self.config.language = Some(self.lang);
         if let Err(e) = self.save_config() {
+            self.lang = previous;
+            self.config.language = previous_cfg;
             self.status_message = Some(self.trf(Msg::SaveFailed, &[("error", &e.to_string())]));
             return;
         }
@@ -2441,6 +2470,22 @@ mod tests {
         assert_eq!(Language::ALL[app.language_selected], Language::Sr);
         app.select_language_prev();
         assert_eq!(Language::ALL[app.language_selected], Language::It);
+        assert_eq!(app.lang, Language::It);
+    }
+
+    #[test]
+    fn language_picker_preview_does_not_save_until_enter() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        app.lang = Language::It;
+        app.config.language = Some(Language::It);
+        app.open_language_picker();
+        app.select_language_next();
+        assert_eq!(app.lang, Language::Sr);
+        assert_eq!(app.config.language, Some(Language::It));
+        app.cancel_language_picker();
+        assert!(!app.show_language_popup);
+        assert_eq!(app.lang, Language::It);
+        assert_eq!(app.config.language, Some(Language::It));
     }
 
     #[test]
