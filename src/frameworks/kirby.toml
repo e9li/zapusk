@@ -1,0 +1,26 @@
+id = "kirby"
+label = "kirby"
+
+[start]
+command = "{php}"
+args = ["-S", "{domain}:{port}", "-t", "{root}", "kirby/router.php"]
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "static_plus_proxy"
+root = "{root}"
+block_paths = ["/content/*", "/site/*", "/kirby/*", "/.*"]
+
+[hooks]
+resolve_php_binary = true
+require_php = true
+
+[doctor]
+binaries = ["php"]
+marker_files = ["composer.json"]
+
+[discovery]
+command_contains = ["kirby"]

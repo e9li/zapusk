@@ -1,39 +1,57 @@
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 
-use crate::core::config::{config_path, parse_aliases, Config, ProjectConfig, ProjectType};
+use crate::core::config::{Config, ProjectConfig, config_path, parse_aliases};
+use crate::core::framework::{FrameworkId, FrameworkRegistry, ensure_frameworks_dir};
 
 pub async fn run() -> Result<()> {
     println!("Add a new project to zapusk config\n");
 
     let tld = Config::tld_or_default();
+    let frameworks = FrameworkRegistry::load();
+    let type_ids = frameworks.ids();
+    if type_ids.is_empty() {
+        anyhow::bail!("no framework recipes loaded");
+    }
+    let _ = ensure_frameworks_dir();
     let name = prompt("Project name")?;
     let slug = crate::core::slugify(&name);
     let default_domain = format!("{}.{}", slug, tld);
     let domain = prompt_with_default("Domain", &default_domain)?;
     let aliases_raw = prompt_with_default("Additional domains (comma-separated)", "")?;
     let aliases = parse_aliases(&aliases_raw);
-    let port: u16 = prompt("Port")?.parse().context("Port must be a number 1-65535")?;
+    let port: u16 = prompt("Port")?
+        .parse()
+        .context("Port must be a number 1-65535")?;
     if port == 0 {
         anyhow::bail!("Port must be between 1 and 65535");
     }
-    let project_type: ProjectType =
-        prompt_with_default("Type (phoenix/symfony/kirby/axum/compose)", "phoenix")?
+    let type_hint = type_ids.join("/");
+    let project_type: FrameworkId =
+        prompt_with_default(&format!("Type ({})", type_hint), &type_ids[0])?
             .parse()
             .context("Invalid project type")?;
+    if !frameworks.contains(project_type.as_str()) {
+        anyhow::bail!(
+            "Unknown project type '{}'. Known: {}",
+            project_type,
+            type_ids.join(", ")
+        );
+    }
+    let spec = frameworks.get_required(&project_type)?;
     let tls = prompt_bool_with_default("Enable TLS (https)", false)?;
     let path = prompt("Project directory (e.g. /home/user/projects/myapp)")?;
     if !std::path::Path::new(&path).is_dir() {
         anyhow::bail!("Directory not found: {}", path);
     }
 
-    let php_version = if project_type == ProjectType::Kirby {
+    let php_version = if spec.uses_php() {
         Some(prompt_with_default("PHP version", "8.3")?)
     } else {
         None
     };
 
-    let (compose_file, service) = if project_type == ProjectType::Compose {
+    let (compose_file, service) = if spec.is_compose() {
         let file = prompt_with_default("Compose file (relative to project dir)", "auto-detect")?;
         let compose_file = if file == "auto-detect" {
             None
@@ -44,7 +62,11 @@ pub async fn run() -> Result<()> {
             Some(file)
         };
         let service = prompt_with_default("Main service name (optional)", "")?;
-        let service = if service.is_empty() { None } else { Some(service) };
+        let service = if service.is_empty() {
+            None
+        } else {
+            Some(service)
+        };
         (compose_file, service)
     } else {
         (None, None)
@@ -128,8 +150,8 @@ pub async fn run() -> Result<()> {
     }
 
     // Serialize using TOML library to safely handle special characters in user input
-    let project_toml = toml::to_string_pretty(&new_project)
-        .context("Failed to serialize project config")?;
+    let project_toml =
+        toml::to_string_pretty(&new_project).context("Failed to serialize project config")?;
     let block = format!("\n\n[[projects]]\n{}", project_toml);
 
     let mut file = std::fs::OpenOptions::new()

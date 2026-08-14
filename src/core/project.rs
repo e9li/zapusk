@@ -21,6 +21,7 @@ pub enum ProcessOrigin {
 }
 
 impl ProjectStatus {
+    #[allow(dead_code)]
     pub fn label(&self) -> &str {
         match self {
             ProjectStatus::Stopped => "stopped",

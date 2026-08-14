@@ -1,10 +1,12 @@
 mod cli;
 mod core;
+mod i18n;
 mod platform;
 mod tui;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use crossterm::{
     event::{Event, EventStream},
     execute,
@@ -47,6 +49,12 @@ enum Commands {
         #[arg(long, value_name = "PORT_OR_PID")]
         import: Option<String>,
     },
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[tokio::main]
@@ -59,6 +67,7 @@ async fn main() -> Result<()> {
         Some(Commands::Add) => cli::add::run().await,
         Some(Commands::Destroy) => cli::destroy::run().await,
         Some(Commands::Discover { json, import }) => cli::discover::run(json, import).await,
+        Some(Commands::Completions { shell }) => cli::completions::run(shell, Cli::command()),
         None => run_tui().await,
     }
 }
@@ -150,7 +159,7 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
                 app.handle_background_event(event);
                 true
             }
-            _ = housekeeping.tick() => app.housekeeping_tick(),
+            _ = housekeeping.tick() => app.housekeeping_tick().await,
         };
 
         // Coalesce: drain anything else already queued before a single draw.

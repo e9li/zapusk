@@ -2,6 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::app::{AddForm, App};
+use crate::i18n::Msg;
 use crate::platform;
 
 impl App {
@@ -17,7 +18,7 @@ impl App {
             match key.code {
                 KeyCode::Esc => {
                     self.add_form = None;
-                    self.status_message = Some("Cancelled".into());
+                    self.status_message = Some(self.tr(Msg::Cancelled).into());
                 }
                 KeyCode::Enter => {
                     let val = form.current_value().to_string();
@@ -27,13 +28,15 @@ impl App {
                             super::app::AddField::Name | super::app::AddField::Path
                         )
                     {
-                        self.status_message = Some(format!("{} cannot be empty", form.label()));
+                        let field_msg = form.label_msg();
+                        let field = self.lang.tr(field_msg).to_string();
+                        self.status_message = Some(self.trf(Msg::FieldEmpty, &[("field", &field)]));
                         return Ok(());
                     }
                     if matches!(form.field, super::app::AddField::Path)
                         && !std::path::Path::new(&val).is_dir()
                     {
-                        self.status_message = Some(format!("Directory not found: {}", val));
+                        self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &val)]));
                         return Ok(());
                     }
                     let tld = self.config.tld.clone();
@@ -80,7 +83,7 @@ impl App {
             match key.code {
                 KeyCode::Esc => {
                     self.edit_form = None;
-                    self.status_message = Some("Cancelled".into());
+                    self.status_message = Some(self.tr(Msg::Cancelled).into());
                 }
                 KeyCode::Enter => {
                     let val = form.current_value().to_string();
@@ -90,13 +93,15 @@ impl App {
                             super::app::AddField::Name | super::app::AddField::Path
                         )
                     {
-                        self.status_message = Some(format!("{} cannot be empty", form.label()));
+                        let field_msg = form.label_msg();
+                        let field = self.lang.tr(field_msg).to_string();
+                        self.status_message = Some(self.trf(Msg::FieldEmpty, &[("field", &field)]));
                         return Ok(());
                     }
                     if matches!(form.field, super::app::AddField::Path)
                         && !std::path::Path::new(&val).is_dir()
                     {
-                        self.status_message = Some(format!("Directory not found: {}", val));
+                        self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &val)]));
                         return Ok(());
                     }
                     if form.next_field() {
@@ -158,7 +163,7 @@ impl App {
                     self.execute_confirm(dialog.action).await;
                 }
                 _ => {
-                    self.status_message = Some("Cancelled".into());
+                    self.status_message = Some(self.tr(Msg::Cancelled).into());
                 }
             }
             return Ok(());
@@ -257,8 +262,8 @@ impl App {
             // Add project
             KeyCode::Char('a') => {
                 self.edit_form = None;
-                self.add_form = Some(AddForm::new());
-                self.status_message = Some("Adding project...".into());
+                self.add_form = Some(AddForm::new(self.frameworks.ids()));
+                self.status_message = Some(self.tr(Msg::AddingProject).into());
             }
 
             // Edit project
@@ -266,6 +271,9 @@ impl App {
 
             // Remove project
             KeyCode::Char('D') | KeyCode::Delete => self.confirm_remove_selected(),
+
+            // Language
+            KeyCode::Char('l') => self.cycle_language(),
 
             // Help
             KeyCode::Char('?') => {
@@ -295,8 +303,11 @@ impl App {
         if let Some(project) = self.selected_project() {
             let domain = project.config.domain.clone();
             match platform::copy_to_clipboard(&domain) {
-                Ok(()) => self.status_message = Some(format!("Copied {}", domain)),
-                Err(e) => self.status_message = Some(format!("Clipboard error: {}", e)),
+                Ok(()) => self.status_message = Some(self.trf(Msg::Copied, &[("domain", &domain)])),
+                Err(e) => {
+                    self.status_message =
+                        Some(self.trf(Msg::ClipboardError, &[("error", &e.to_string())]))
+                }
             }
         }
     }
@@ -306,7 +317,8 @@ impl App {
             let scheme = if project.config.tls { "https" } else { "http" };
             let url = format!("{}://{}", scheme, project.config.domain);
             if let Err(e) = platform::open_url(&url) {
-                self.status_message = Some(format!("Could not open browser: {}", e));
+                self.status_message =
+                    Some(self.trf(Msg::BrowserError, &[("error", &e.to_string())]));
             }
         }
     }

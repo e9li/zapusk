@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -6,8 +6,9 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::core::config::{ProjectConfig, ProjectType};
+use crate::core::config::{ProjectConfig, ensure_php_version_file};
 use crate::core::docker::{self, StackRef};
+use crate::core::framework::FrameworkRegistry;
 use crate::core::project::ProjectStatus;
 
 /// Messages sent from background tasks back to the main app
@@ -45,8 +46,8 @@ struct Tracked {
     kind: ProcKind,
 }
 
-fn proc_kind(config: &ProjectConfig) -> ProcKind {
-    if config.project_type == ProjectType::Compose {
+fn proc_kind(config: &ProjectConfig, frameworks: &FrameworkRegistry) -> ProcKind {
+    if frameworks.is_compose(&config.project_type) {
         ProcKind::Compose(StackRef::from_config(config))
     } else {
         ProcKind::Native
@@ -60,14 +61,16 @@ pub struct Manager {
     /// project name -> process (adopted external processes)
     adopted: HashMap<String, Tracked>,
     pub event_tx: mpsc::Sender<ManagerEvent>,
+    frameworks: FrameworkRegistry,
 }
 
 impl Manager {
-    pub fn new(event_tx: mpsc::Sender<ManagerEvent>) -> Self {
+    pub fn new(event_tx: mpsc::Sender<ManagerEvent>, frameworks: FrameworkRegistry) -> Self {
         Self {
             spawned: HashMap::new(),
             adopted: HashMap::new(),
             event_tx,
+            frameworks,
         }
     }
 
@@ -75,14 +78,34 @@ impl Manager {
         self.spawned.contains_key(name) || self.adopted.contains_key(name)
     }
 
+    /// Drop tracking for a project without signaling the process.
+    /// Used when the project disappears from config while the TUI is open.
+    pub fn forget(&mut self, name: &str) {
+        self.spawned.remove(name);
+        self.adopted.remove(name);
+    }
+
+    #[cfg(test)]
+    pub fn track_for_test(&mut self, name: &str) {
+        self.spawned.insert(
+            name.to_string(),
+            Tracked {
+                pid: 1,
+                kind: ProcKind::Native,
+            },
+        );
+    }
+
     pub async fn start(&mut self, config: &ProjectConfig) -> Result<ProjectStatus> {
         if self.is_running(&config.name) {
             bail!("Project {} is already running", config.name);
         }
 
+        let spec = self.frameworks.get_required(&config.project_type)?;
+
         // Check if port is already in use — try to adopt the existing process
         if TcpListener::bind(("127.0.0.1", config.port)).is_err() {
-            if config.project_type == ProjectType::Compose {
+            if spec.is_compose() {
                 // lsof on a docker-published port returns docker-proxy (Linux)
                 // or Docker Desktop's VM process (macOS) — never adopt or
                 // signal those. Check the compose stack itself instead.
@@ -131,12 +154,12 @@ impl Manager {
             );
         }
 
-        // Sync `.php-version` from config for Symfony before building the start
-        // command, so the Symfony CLI (which reads that file) uses the intended
-        // PHP version. Returns diagnostic notes appended below.
-        let php_version_notes = crate::core::config::ensure_symfony_php_version(config);
+        let mut php_version_notes = vec![];
+        if spec.hooks.sync_php_version {
+            php_version_notes = ensure_php_version_file(config);
+        }
 
-        let (bin, args, mut notes) = if config.project_type == ProjectType::Compose {
+        let (bin, args, mut notes) = if spec.is_compose() {
             // Foreground `up`: the compose CLI becomes the tracked child, so
             // log tailing, pidfiles, and exit detection work unchanged.
             docker::up_command(config).await?
@@ -158,7 +181,7 @@ impl Manager {
             if !config.args.is_empty() {
                 bail!("Project {} has `args` set without `command`", config.name);
             }
-            config.project_type.start_command(config)
+            spec.resolve_start(config)
         };
         notes.extend(php_version_notes);
 
@@ -171,20 +194,11 @@ impl Manager {
             .current_dir(&config.path)
             .env("PORT", config.port.to_string());
 
-        for (key, val) in &config.env {
+        for (key, val) in spec.resolve_env(config) {
             cmd.env(key, val);
         }
-
-        // Framework-aware reverse proxy env vars
-        match config.project_type {
-            ProjectType::Symfony => {
-                cmd.env("TRUSTED_PROXIES", "127.0.0.1,::1");
-            }
-            ProjectType::Phoenix => {
-                cmd.env("PHX_HOST", &config.domain);
-                cmd.env("PHX_SERVER", "true");
-            }
-            _ => {}
+        for (key, val) in &config.env {
+            cmd.env(key, val);
         }
 
         // Redirect stdout/stderr to log files so the child process is not killed
@@ -289,7 +303,7 @@ impl Manager {
             config.name.clone(),
             Tracked {
                 pid,
-                kind: proc_kind(config),
+                kind: proc_kind(config, &self.frameworks),
             },
         );
 
@@ -422,7 +436,7 @@ impl Manager {
                     config.name.clone(),
                     Tracked {
                         pid,
-                        kind: proc_kind(config),
+                        kind: proc_kind(config, &self.frameworks),
                     },
                 );
                 let _ = self
@@ -469,7 +483,7 @@ impl Manager {
 
         // Compose stacks: detect via the compose CLI, not lsof — the PID on a
         // docker-published port is docker-proxy / Docker Desktop's VM process.
-        if config.project_type == ProjectType::Compose {
+        if self.frameworks.is_compose(&config.project_type) {
             if docker::ps_running(config).await {
                 return self.adopt_compose_stack(config).await.ok();
             }
@@ -551,7 +565,11 @@ async fn stop_compose(pid: u32, stack: &StackRef, kill_group: bool) -> Result<()
 
     // Still alive (e.g. compose stop failed because docker is gone) — SIGTERM
     // triggers the compose CLI's own graceful shutdown as a fallback.
-    let target = if kill_group { -(pid as i32) } else { pid as i32 };
+    let target = if kill_group {
+        -(pid as i32)
+    } else {
+        pid as i32
+    };
     unsafe { libc::kill(target, libc::SIGTERM) };
     stop_result
 }
@@ -559,7 +577,11 @@ async fn stop_compose(pid: u32, stack: &StackRef, kill_group: bool) -> Result<()
 /// Stop a process with SIGTERM, wait up to 3s, then escalate to SIGKILL.
 /// When `kill_group` is true, signals are sent to the process group (negative PID).
 async fn stop_process(pid: u32, kill_group: bool) -> Result<()> {
-    let target = if kill_group { -(pid as i32) } else { pid as i32 };
+    let target = if kill_group {
+        -(pid as i32)
+    } else {
+        pid as i32
+    };
 
     let rc = unsafe { libc::kill(target, libc::SIGTERM) };
     if rc != 0 {
@@ -726,4 +748,3 @@ async fn send_log_history(
         }
     }
 }
-

@@ -4,7 +4,7 @@ use std::path::Path;
 use tokio::process::Command;
 
 use crate::cli::spinner::Spinner;
-use crate::core::config::{config_path, Config};
+use crate::core::config::{Config, config_path};
 use crate::platform;
 
 pub async fn run() -> Result<()> {

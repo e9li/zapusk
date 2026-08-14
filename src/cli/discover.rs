@@ -1,17 +1,19 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::core::config::{config_path, CaddyConfig, Config, ProjectConfig, ProjectType};
-use crate::core::discovery::{discover_services, ServiceInfo, StackKind};
+use crate::core::config::{CaddyConfig, Config, ProjectConfig, config_path};
+use crate::core::discovery::{ServiceInfo, discover_services};
+use crate::core::framework::{FrameworkId, FrameworkRegistry};
 
 pub async fn run(json: bool, import: Option<String>) -> Result<()> {
     let loaded = Config::load().ok();
-    let mut services = discover_services(loaded.as_ref()).await?;
+    let frameworks = FrameworkRegistry::load();
+    let mut services = discover_services(loaded.as_ref(), Some(&frameworks)).await?;
 
     if let Some(target) = import {
         let mut config = loaded.unwrap_or_else(default_config);
-        import_service(&target, &services, &mut config)?;
+        import_service(&target, &services, &mut config, &frameworks)?;
         save_config(&config)?;
         println!(
             "Imported service {} into {}",
@@ -58,7 +60,12 @@ pub async fn run(json: bool, import: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn import_service(target: &str, services: &[ServiceInfo], config: &mut Config) -> Result<()> {
+fn import_service(
+    target: &str,
+    services: &[ServiceInfo],
+    config: &mut Config,
+    frameworks: &FrameworkRegistry,
+) -> Result<()> {
     let parsed = target
         .parse::<u32>()
         .map_err(|_| anyhow::anyhow!("`{}` is not a valid pid/port", target))?;
@@ -110,12 +117,13 @@ fn import_service(target: &str, services: &[ServiceInfo], config: &mut Config) -
         i += 1;
     }
 
-    let (project_type, php_version) = match service.stack {
-        StackKind::Php => (ProjectType::Symfony, None),
-        StackKind::Elixir => (ProjectType::Phoenix, None),
-        StackKind::Rust => (ProjectType::Axum, None),
-        StackKind::Unknown => (ProjectType::Axum, None),
+    let guessed = service.stack.label();
+    let project_type = if frameworks.contains(guessed) {
+        FrameworkId::new(guessed)
+    } else {
+        FrameworkId::new("axum")
     };
+    let php_version = None;
 
     let (command, args) = command_override_from_service(service);
 
@@ -203,6 +211,7 @@ fn default_config() -> Config {
         discovery: None,
         ignored_services: vec![],
         theme: None,
+        language: None,
     }
 }
 

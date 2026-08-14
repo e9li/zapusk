@@ -11,12 +11,14 @@ use tokio::time::timeout;
 
 use crate::core::caddy;
 use crate::core::config::{
-    Config, IgnoredService, ProjectConfig, ProjectType, config_path, parse_aliases,
+    Config, IgnoredService, ProjectConfig, config_path, hash_config_bytes, parse_aliases,
 };
 use crate::core::discovery::ServiceInfo;
-use crate::core::discovery::{StackKind, discover_services};
+use crate::core::discovery::discover_services;
+use crate::core::framework::{FrameworkId, FrameworkRegistry};
 use crate::core::manager::{Manager, ManagerEvent};
 use crate::core::project::{LogEntry, ProcessOrigin, Project, ProjectStatus};
+use crate::i18n::{Language, Msg, fill};
 
 /// Which pane is focused
 #[derive(Debug, Clone, PartialEq)]
@@ -125,8 +127,6 @@ pub enum AddField {
     Path,
 }
 
-pub const TYPE_OPTIONS: &[&str] = &["phoenix", "symfony", "kirby", "axum", "compose"];
-
 /// State for the inline add-project form
 #[derive(Debug, Clone)]
 pub struct AddForm {
@@ -137,6 +137,7 @@ pub struct AddForm {
     pub port: String,
     pub upstream_host: String,
     pub type_index: usize,
+    pub type_ids: Vec<String>,
     pub tls: bool,
     pub path: String,
 }
@@ -151,12 +152,13 @@ pub struct EditForm {
     pub port: String,
     pub upstream_host: String,
     pub type_index: usize,
+    pub type_ids: Vec<String>,
     pub tls: bool,
     pub path: String,
 }
 
 impl AddForm {
-    pub fn new() -> Self {
+    pub fn new(type_ids: Vec<String>) -> Self {
         Self {
             field: AddField::Name,
             name: String::new(),
@@ -165,22 +167,32 @@ impl AddForm {
             port: String::new(),
             upstream_host: String::new(),
             type_index: 0,
+            type_ids,
             tls: false,
             path: String::new(),
         }
     }
 
     pub fn project_type(&self) -> &str {
-        TYPE_OPTIONS[self.type_index]
+        self.type_ids
+            .get(self.type_index)
+            .map(String::as_str)
+            .unwrap_or("phoenix")
     }
 
     pub fn cycle_type_next(&mut self) {
-        self.type_index = (self.type_index + 1) % TYPE_OPTIONS.len();
+        if self.type_ids.is_empty() {
+            return;
+        }
+        self.type_index = (self.type_index + 1) % self.type_ids.len();
     }
 
     pub fn cycle_type_prev(&mut self) {
+        if self.type_ids.is_empty() {
+            return;
+        }
         if self.type_index == 0 {
-            self.type_index = TYPE_OPTIONS.len() - 1;
+            self.type_index = self.type_ids.len() - 1;
         } else {
             self.type_index -= 1;
         }
@@ -222,16 +234,16 @@ impl AddForm {
         }
     }
 
-    pub fn label(&self) -> &str {
+    pub fn label_msg(&self) -> Msg {
         match self.field {
-            AddField::Name => "Name",
-            AddField::Domain => "Domain",
-            AddField::Aliases => "Aliases (comma-separated)",
-            AddField::Port => "Port",
-            AddField::UpstreamHost => "Upstream host",
-            AddField::Type => "Type",
-            AddField::Tls => "TLS",
-            AddField::Path => "Project directory",
+            AddField::Name => Msg::LabelName,
+            AddField::Domain => Msg::LabelDomain,
+            AddField::Aliases => Msg::LabelAliases,
+            AddField::Port => Msg::LabelPort,
+            AddField::UpstreamHost => Msg::LabelUpstream,
+            AddField::Type => Msg::LabelType,
+            AddField::Tls => Msg::LabelTls,
+            AddField::Path => Msg::LabelDirectory,
         }
     }
 
@@ -276,11 +288,16 @@ impl AddForm {
 }
 
 impl EditForm {
-    pub fn from_project(project_index: usize, project: &ProjectConfig) -> Self {
-        let type_index = TYPE_OPTIONS
-            .iter()
-            .position(|t| *t == project.project_type.label())
-            .unwrap_or(0);
+    pub fn from_project(
+        project_index: usize,
+        project: &ProjectConfig,
+        mut type_ids: Vec<String>,
+    ) -> Self {
+        let current = project.project_type.as_str();
+        if !type_ids.iter().any(|t| t == current) {
+            type_ids.insert(0, current.to_string());
+        }
+        let type_index = type_ids.iter().position(|t| t == current).unwrap_or(0);
 
         Self {
             project_index,
@@ -291,22 +308,32 @@ impl EditForm {
             port: project.port.to_string(),
             upstream_host: project.upstream_host.clone().unwrap_or_default(),
             type_index,
+            type_ids,
             tls: project.tls,
             path: project.path.clone(),
         }
     }
 
     pub fn project_type(&self) -> &str {
-        TYPE_OPTIONS[self.type_index]
+        self.type_ids
+            .get(self.type_index)
+            .map(String::as_str)
+            .unwrap_or("phoenix")
     }
 
     pub fn cycle_type_next(&mut self) {
-        self.type_index = (self.type_index + 1) % TYPE_OPTIONS.len();
+        if self.type_ids.is_empty() {
+            return;
+        }
+        self.type_index = (self.type_index + 1) % self.type_ids.len();
     }
 
     pub fn cycle_type_prev(&mut self) {
+        if self.type_ids.is_empty() {
+            return;
+        }
         if self.type_index == 0 {
-            self.type_index = TYPE_OPTIONS.len() - 1;
+            self.type_index = self.type_ids.len() - 1;
         } else {
             self.type_index -= 1;
         }
@@ -348,16 +375,16 @@ impl EditForm {
         }
     }
 
-    pub fn label(&self) -> &str {
+    pub fn label_msg(&self) -> Msg {
         match self.field {
-            AddField::Name => "Name",
-            AddField::Domain => "Domain",
-            AddField::Aliases => "Aliases (comma-separated)",
-            AddField::Port => "Port",
-            AddField::UpstreamHost => "Upstream host",
-            AddField::Type => "Type",
-            AddField::Tls => "TLS",
-            AddField::Path => "Project directory",
+            AddField::Name => Msg::LabelName,
+            AddField::Domain => Msg::LabelDomain,
+            AddField::Aliases => Msg::LabelAliases,
+            AddField::Port => Msg::LabelPort,
+            AddField::UpstreamHost => Msg::LabelUpstream,
+            AddField::Type => Msg::LabelType,
+            AddField::Tls => Msg::LabelTls,
+            AddField::Path => Msg::LabelDirectory,
         }
     }
 
@@ -399,7 +426,6 @@ impl EditForm {
 /// A pending confirmation dialog
 #[derive(Debug, Clone)]
 pub struct ConfirmDialog {
-    pub message: String,
     pub action: ConfirmAction,
 }
 
@@ -450,6 +476,12 @@ pub struct App {
     pub(crate) manager: Manager,
     /// Taken out of `App` once, into the run loop, via `take_receivers()`.
     event_rx: Option<mpsc::Receiver<ManagerEvent>>,
+    pub frameworks: FrameworkRegistry,
+    pub lang: Language,
+    config_hash: u64,
+    config_mtime: Option<std::time::SystemTime>,
+    config_len: u64,
+    last_config_poll: Instant,
 }
 
 /// The two channel receivers, handed from `App` to the main run loop so that
@@ -467,8 +499,10 @@ impl App {
 
         let projects = config.projects.iter().cloned().map(Project::new).collect();
         crate::tui::ui::init_theme(config.theme.as_ref());
+        let frameworks = FrameworkRegistry::load();
+        let lang = config.language.unwrap_or_else(Language::from_env);
 
-        Self {
+        let mut app = Self {
             projects,
             selected: 0,
             active_pane: ActivePane::ProjectList,
@@ -500,9 +534,45 @@ impl App {
             service_refresh_in_flight: false,
             app_event_tx,
             app_event_rx: Some(app_event_rx),
-            manager: Manager::new(tx),
+            manager: Manager::new(tx, frameworks.clone()),
             event_rx: Some(rx),
+            frameworks,
+            lang,
+            config_hash: 0,
+            config_mtime: None,
+            config_len: 0,
+            last_config_poll: Instant::now(),
+        };
+        app.prime_config_watch();
+        app
+    }
+
+    pub fn tr(&self, msg: Msg) -> &'static str {
+        self.lang.tr(msg)
+    }
+
+    pub fn trf(&self, msg: Msg, pairs: &[(&str, &str)]) -> String {
+        fill(self.lang.tr(msg), pairs)
+    }
+
+    pub fn status_label(&self, status: &ProjectStatus) -> &'static str {
+        match status {
+            ProjectStatus::Stopped => self.tr(Msg::StatusStopped),
+            ProjectStatus::Starting => self.tr(Msg::StatusStarting),
+            ProjectStatus::Running => self.tr(Msg::StatusRunning),
+            ProjectStatus::Failed(_) => self.tr(Msg::StatusFailed),
         }
+    }
+
+    pub(crate) fn cycle_language(&mut self) {
+        self.lang = self.lang.next();
+        self.config.language = Some(self.lang);
+        if let Err(e) = self.save_config() {
+            self.status_message = Some(self.trf(Msg::SaveFailed, &[("error", &e.to_string())]));
+            return;
+        }
+        self.status_message =
+            Some(self.trf(Msg::LanguageSet, &[("lang", self.lang.native_name())]));
     }
 
     /// Project indices in display order: running projects first, then stopped,
@@ -515,14 +585,12 @@ impl App {
             let pa = &self.projects[a];
             let pb = &self.projects[b];
             // running (false) sorts before stopped (true)
-            (!pa.is_running())
-                .cmp(&!pb.is_running())
-                .then_with(|| {
-                    pa.config
-                        .name
-                        .to_lowercase()
-                        .cmp(&pb.config.name.to_lowercase())
-                })
+            (!pa.is_running()).cmp(&!pb.is_running()).then_with(|| {
+                pa.config
+                    .name
+                    .to_lowercase()
+                    .cmp(&pb.config.name.to_lowercase())
+            })
         });
         order
     }
@@ -559,12 +627,16 @@ impl App {
     /// exits, kick off background refreshes, and advance the spinner only while
     /// something is animating. Returns true if visible state changed (so the
     /// run loop knows whether a redraw is warranted).
-    pub(crate) fn housekeeping_tick(&mut self) -> bool {
+    pub(crate) async fn housekeeping_tick(&mut self) -> bool {
         let mut changed = false;
 
         // Adopted processes have no exit channel, so poll for their exit here.
         for event in self.manager.poll_exits() {
             self.handle_manager_event(event);
+            changed = true;
+        }
+
+        if self.poll_config_reload().await {
             changed = true;
         }
 
@@ -605,9 +677,10 @@ impl App {
             self.discovery_refresh_in_flight = true;
             self.last_discovery_refresh = Instant::now();
             let cfg = self.config.clone();
+            let frameworks = self.frameworks.clone();
             let tx = self.app_event_tx.clone();
             tokio::spawn(async move {
-                let result = discover_services(Some(&cfg))
+                let result = discover_services(Some(&cfg), Some(&frameworks))
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(BackgroundEvent::UnmanagedRefreshed(result)).await;
@@ -642,7 +715,9 @@ impl App {
                         self.apply_unmanaged_filter();
                     }
                     Err(e) => {
-                        self.status_message = Some(format!("Discovery failed: {}", e));
+                        let err = e.to_string();
+                        self.status_message =
+                            Some(self.trf(Msg::DiscoveryFailed, &[("error", &err)]));
                         app_diag_log(&format!("discovery refresh failed: {}", e));
                     }
                 }
@@ -665,25 +740,26 @@ impl App {
 
                 match result {
                     Ok(code) => {
+                        let code = code.to_string();
                         self.append_system_log(
                             &project_name,
-                            format!("domain reachable (HTTP {})", code),
+                            self.trf(Msg::DomainReachable, &[("code", &code)]),
                             false,
                         );
-                        self.status_message = Some(format!(
-                            "{} started - domain reachable (HTTP {})",
-                            project_name, code
+                        self.status_message = Some(self.trf(
+                            Msg::DomainReachableStatus,
+                            &[("name", &project_name), ("code", &code)],
                         ));
                     }
                     Err(reason) => {
                         self.append_system_log(
                             &project_name,
-                            format!("domain check failed: {}", reason),
+                            self.trf(Msg::DomainCheckFailed, &[("reason", &reason)]),
                             true,
                         );
-                        self.status_message = Some(format!(
-                            "{} started, but domain check failed: {}",
-                            project_name, reason
+                        self.status_message = Some(self.trf(
+                            Msg::DomainCheckFailedStatus,
+                            &[("name", &project_name), ("reason", &reason)],
                         ));
                     }
                 }
@@ -695,9 +771,9 @@ impl App {
         self.startup_phases
             .get(project_name)
             .map(|phase| match phase {
-                StartupPhase::EnsuringCaddy => "caddy",
-                StartupPhase::StartingProcess => "spawn",
-                StartupPhase::VerifyingDomain => "verify",
+                StartupPhase::EnsuringCaddy => self.tr(Msg::PhaseCaddy),
+                StartupPhase::StartingProcess => self.tr(Msg::PhaseSpawn),
+                StartupPhase::VerifyingDomain => self.tr(Msg::PhaseVerify),
             })
     }
 
@@ -737,15 +813,16 @@ impl App {
                     });
                     p.started_at = Some(Local::now());
                 }
+                let pid_s = pid.to_string();
                 self.status_message = Some(if adopted {
-                    format!(
-                        "{} conflict: port already in use, adopted existing process (pid {})",
-                        project_name, pid
+                    self.trf(
+                        Msg::AdoptedConflict,
+                        &[("name", &project_name), ("pid", &pid_s)],
                     )
                 } else if keep_starting {
-                    format!("{}: process started, verifying domain...", project_name)
+                    self.trf(Msg::StartedVerifying, &[("name", &project_name)])
                 } else {
-                    format!("{} started", project_name)
+                    self.trf(Msg::Started, &[("name", &project_name)])
                 });
             }
             ManagerEvent::ProcessExited {
@@ -852,7 +929,7 @@ impl App {
 
             // Ensure Caddy is running with current config before starting the project
             self.append_system_log(&name, "step 1/3: ensuring Caddy config", false);
-            self.status_message = Some(format!("{}: step 1/3 ensuring Caddy config...", name));
+            self.status_message = Some(self.trf(Msg::StepEnsuringCaddy, &[("name", &name)]));
             if let Some(caddy_err) = self.ensure_caddy().await {
                 self.append_system_log(&name, caddy_err, true);
             }
@@ -871,11 +948,16 @@ impl App {
                     self.startup_phases
                         .insert(name.clone(), StartupPhase::VerifyingDomain);
                     self.append_system_log(&name, "step 3/3: verifying domain with curl", false);
-                    self.status_message = Some(format!("{}: step 3/3 verifying domain...", name));
+                    self.status_message = Some(self.trf(Msg::StepVerifying, &[("name", &name)]));
 
                     let tx = self.app_event_tx.clone();
+                    let attempts = self
+                        .frameworks
+                        .get(&config.project_type)
+                        .map(|s| s.lifecycle.ready_attempts)
+                        .unwrap_or(8);
                     tokio::spawn(async move {
-                        let result = verify_project_domain_static(&config).await;
+                        let result = verify_project_domain_static(&config, attempts).await;
                         let _ = tx
                             .send(BackgroundEvent::DomainVerificationDone {
                                 project_name: name,
@@ -889,8 +971,13 @@ impl App {
                     if let Some(p) = self.find_project_mut(&name) {
                         p.status = ProjectStatus::Failed(e.to_string());
                     }
-                    self.append_system_log(&name, format!("start failed: {}", e), true);
-                    self.status_message = Some(format!("Error: {}", e));
+                    let err = e.to_string();
+                    self.append_system_log(
+                        &name,
+                        self.trf(Msg::StartFailed, &[("error", &err)]),
+                        true,
+                    );
+                    self.status_message = Some(self.trf(Msg::Error, &[("error", &err)]));
                 }
             }
         }
@@ -902,8 +989,8 @@ impl App {
     async fn ensure_caddy(&mut self) -> Option<String> {
         if let Some(caddy_cfg) = &self.config.caddy.clone() {
             let projects: Vec<_> = self.projects.iter().map(|p| p.config.clone()).collect();
-            if let Err(e) = caddy::write_and_reload(&projects, caddy_cfg).await {
-                let msg = format!("Caddy warning: {}", e);
+            if let Err(e) = caddy::write_and_reload(&projects, caddy_cfg, &self.frameworks).await {
+                let msg = self.trf(Msg::CaddyWarning, &[("error", &e.to_string())]);
                 self.status_message = Some(msg.clone());
                 return Some(msg);
             }
@@ -922,10 +1009,10 @@ impl App {
                     p.origin = None;
                     p.started_at = None;
                 }
-                self.status_message = Some(format!("Stopped {}", name));
+                self.status_message = Some(self.trf(Msg::Stopped, &[("name", &name)]));
             }
             Err(e) => {
-                self.status_message = Some(format!("Error: {}", e));
+                self.status_message = Some(self.trf(Msg::Error, &[("error", &e.to_string())]));
             }
         }
     }
@@ -943,12 +1030,15 @@ impl App {
     pub(crate) async fn reload_caddy(&mut self) {
         if let Some(caddy_cfg) = &self.config.caddy.clone() {
             let projects: Vec<_> = self.projects.iter().map(|p| p.config.clone()).collect();
-            match caddy::write_and_reload(&projects, caddy_cfg).await {
-                Ok(()) => self.status_message = Some("Caddy reloaded".into()),
-                Err(e) => self.status_message = Some(format!("Caddy error: {}", e)),
+            match caddy::write_and_reload(&projects, caddy_cfg, &self.frameworks).await {
+                Ok(()) => self.status_message = Some(self.tr(Msg::CaddyReloaded).into()),
+                Err(e) => {
+                    self.status_message =
+                        Some(self.trf(Msg::CaddyError, &[("error", &e.to_string())]))
+                }
             }
         } else {
-            self.status_message = Some("No [caddy] section in config".into());
+            self.status_message = Some(self.tr(Msg::NoCaddySection).into());
         }
     }
 
@@ -967,7 +1057,8 @@ impl App {
             }
         }
         if adopted > 0 {
-            self.status_message = Some(format!("Detected {} running project(s)", adopted));
+            self.status_message =
+                Some(self.trf(Msg::DetectedRunning, &[("count", &adopted.to_string())]));
         }
     }
 
@@ -987,10 +1078,11 @@ impl App {
                     Ok(status) => {
                         self.projects[idx].status = status;
                         self.projects[idx].origin = Some(ProcessOrigin::Managed);
-                        self.status_message = Some(format!("Autostarting {}…", name));
+                        self.status_message = Some(self.trf(Msg::Autostarting, &[("name", &name)]));
                     }
                     Err(e) => {
-                        self.status_message = Some(format!("Autostart error: {}", e));
+                        self.status_message =
+                            Some(self.trf(Msg::AutostartError, &[("error", &e.to_string())]));
                     }
                 }
             }
@@ -1001,11 +1093,11 @@ impl App {
         if let Some(project) = self.selected_project() {
             if project.is_running() {
                 self.confirm_dialog = Some(ConfirmDialog {
-                    message: format!("Stop {}? (y/n)", project.config.name),
                     action: ConfirmAction::StopProject(project.config.name.clone()),
                 });
             } else {
-                self.status_message = Some(format!("{} is not running", project.config.name));
+                self.status_message =
+                    Some(self.trf(Msg::NotRunning, &[("name", &project.config.name)]));
             }
         }
     }
@@ -1024,14 +1116,11 @@ impl App {
     pub(crate) fn confirm_remove_selected(&mut self) {
         if let Some(project) = self.selected_project() {
             if project.is_running() {
-                self.status_message = Some(format!(
-                    "Stop {} first before removing",
-                    project.config.name
-                ));
+                self.status_message =
+                    Some(self.trf(Msg::StopFirst, &[("name", &project.config.name)]));
                 return;
             }
             self.confirm_dialog = Some(ConfirmDialog {
-                message: format!("Remove {} from config? (y/n)", project.config.name),
                 action: ConfirmAction::RemoveProject(project.config.name.clone()),
             });
         }
@@ -1048,8 +1137,7 @@ impl App {
 
         // Rewrite config file
         if let Err(e) = self.save_config() {
-            self.status_message =
-                Some(format!("Removed from TUI but could not save config: {}", e));
+            self.status_message = Some(self.trf(Msg::RemovedUnsaved, &[("error", &e.to_string())]));
             return;
         }
 
@@ -1058,49 +1146,46 @@ impl App {
 
         self.refresh_unmanaged().await;
 
-        self.status_message = Some(format!("Removed {}", name));
+        self.status_message = Some(self.trf(Msg::Removed, &[("name", name)]));
     }
 
     pub(crate) async fn finalize_add(&mut self, form: AddForm) {
         let project_type = form
             .project_type()
-            .parse::<ProjectType>()
-            .unwrap_or(ProjectType::Phoenix);
+            .parse::<FrameworkId>()
+            .unwrap_or_else(|_| FrameworkId::new("phoenix"));
         let port = match form.port.parse::<u16>() {
             Ok(0) => {
-                self.status_message = Some("Port must be between 1 and 65535".into());
+                self.status_message = Some(self.tr(Msg::InvalidPortRange).into());
                 return;
             }
             Ok(p) => p,
             Err(_) => {
-                self.status_message = Some(format!(
-                    "Invalid port '{}': must be a number 1-65535",
-                    form.port
-                ));
+                self.status_message = Some(self.trf(Msg::InvalidPort, &[("port", &form.port)]));
                 return;
             }
         };
 
         if form.name.trim().is_empty() {
-            self.status_message = Some("Name cannot be empty".into());
+            self.status_message = Some(self.tr(Msg::NameEmpty).into());
             return;
         }
         if form.domain.trim().is_empty() {
-            self.status_message = Some("Domain cannot be empty".into());
+            self.status_message = Some(self.tr(Msg::DomainEmpty).into());
             return;
         }
         if !std::path::Path::new(&form.path).is_dir() {
-            self.status_message = Some(format!("Directory not found: {}", form.path));
+            self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
             return;
         }
         if let Some(host) = parse_upstream_host(&form.upstream_host) {
             if !is_valid_upstream_host(&host) {
-                self.status_message = Some(format!("Invalid upstream host: {}", host));
+                self.status_message = Some(self.trf(Msg::InvalidUpstream, &[("host", &host)]));
                 return;
             }
         }
         if self.projects.iter().any(|p| p.config.name == form.name) {
-            self.status_message = Some(format!("Project '{}' already exists", form.name));
+            self.status_message = Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
             return;
         }
         let aliases = parse_aliases(&form.aliases);
@@ -1112,7 +1197,7 @@ impl App {
             return;
         }
         if self.projects.iter().any(|p| p.config.port == port) {
-            self.status_message = Some(format!("Port {} is already used by another project", port));
+            self.status_message = Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
             return;
         }
 
@@ -1140,7 +1225,7 @@ impl App {
         self.selected = self.projects.len() - 1;
 
         if let Err(e) = self.save_config() {
-            self.status_message = Some(format!("Added but could not save config: {}", e));
+            self.status_message = Some(self.trf(Msg::AddedUnsaved, &[("error", &e.to_string())]));
             return;
         }
 
@@ -1148,20 +1233,16 @@ impl App {
         self.ensure_caddy().await;
         self.refresh_unmanaged().await;
 
-        self.status_message = Some(format!("Added {}", form.name));
+        self.status_message = Some(self.trf(Msg::Added, &[("name", &form.name)]));
     }
 
     /// Check that the given hostnames don't collide with other projects or
     /// with each other. `exclude_index`, when set, skips that project (for edits).
-    fn hostname_conflict(
-        &self,
-        hosts: &[&str],
-        exclude_index: Option<usize>,
-    ) -> Option<String> {
+    fn hostname_conflict(&self, hosts: &[&str], exclude_index: Option<usize>) -> Option<String> {
         for i in 0..hosts.len() {
             for j in (i + 1)..hosts.len() {
                 if hosts[i] == hosts[j] {
-                    return Some(format!("Duplicate hostname '{}'", hosts[i]));
+                    return Some(self.trf(Msg::DuplicateHost, &[("host", hosts[i])]));
                 }
             }
         }
@@ -1171,9 +1252,9 @@ impl App {
             }
             for existing in project.config.all_hostnames() {
                 if hosts.iter().any(|h| *h == existing) {
-                    return Some(format!(
-                        "Domain '{}' is already used by '{}'",
-                        existing, project.config.name
+                    return Some(self.trf(
+                        Msg::DomainUsed,
+                        &[("host", existing), ("name", &project.config.name)],
                     ));
                 }
             }
@@ -1183,14 +1264,14 @@ impl App {
 
     pub fn add_form_error(&self, form: &AddForm) -> Option<String> {
         if form.name.trim().is_empty() {
-            return Some("Name cannot be empty".into());
+            return Some(self.tr(Msg::NameEmpty).into());
         }
         if self.projects.iter().any(|p| p.config.name == form.name) {
-            return Some(format!("Project '{}' already exists", form.name));
+            return Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
         }
 
         if form.domain.trim().is_empty() {
-            return Some("Domain cannot be empty".into());
+            return Some(self.tr(Msg::DomainEmpty).into());
         }
         let aliases = parse_aliases(&form.aliases);
         let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
@@ -1202,22 +1283,22 @@ impl App {
 
         let port = match form.port.parse::<u16>() {
             Ok(port) => port,
-            Err(_) => return Some(format!("Invalid port: {}", form.port)),
+            Err(_) => return Some(self.trf(Msg::InvalidPort, &[("port", &form.port)])),
         };
         if self.projects.iter().any(|p| p.config.port == port) {
-            return Some(format!("Port {} is already used by another project", port));
+            return Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
         }
         if let Some(host) = parse_upstream_host(&form.upstream_host) {
             if !is_valid_upstream_host(&host) {
-                return Some(format!("Invalid upstream host: {}", host));
+                return Some(self.trf(Msg::InvalidUpstream, &[("host", &host)]));
             }
         }
 
         if form.path.trim().is_empty() {
-            return Some("Project directory cannot be empty".into());
+            return Some(self.tr(Msg::DirEmpty).into());
         }
         if !std::path::Path::new(&form.path).is_dir() {
-            return Some(format!("Directory not found: {}", form.path));
+            return Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
         }
 
         None
@@ -1225,7 +1306,7 @@ impl App {
 
     pub(crate) fn start_edit_selected(&mut self) {
         let Some(project) = self.selected_project() else {
-            self.status_message = Some("No project selected".into());
+            self.status_message = Some(self.tr(Msg::NoProject).into());
             return;
         };
 
@@ -1234,51 +1315,52 @@ impl App {
         let project_config = project.config.clone();
 
         if running {
-            self.status_message = Some(format!("Stop {} before editing", project_name));
+            self.status_message = Some(self.trf(Msg::StopBeforeEdit, &[("name", &project_name)]));
             return;
         }
 
         let idx = self.selected;
         self.add_form = None;
-        self.edit_form = Some(EditForm::from_project(idx, &project_config));
-        self.status_message = Some("Editing project...".into());
+        self.edit_form = Some(EditForm::from_project(
+            idx,
+            &project_config,
+            self.frameworks.ids(),
+        ));
+        self.status_message = Some(self.tr(Msg::EditingProject).into());
     }
 
     pub(crate) async fn finalize_edit(&mut self, form: EditForm) {
         if form.project_index >= self.projects.len() {
-            self.status_message = Some("Project no longer exists".into());
+            self.status_message = Some(self.tr(Msg::ProjectGone).into());
             return;
         }
 
         let project_type = form
             .project_type()
-            .parse::<ProjectType>()
-            .unwrap_or(ProjectType::Phoenix);
+            .parse::<FrameworkId>()
+            .unwrap_or_else(|_| FrameworkId::new("phoenix"));
         let port = match form.port.parse::<u16>() {
             Ok(0) => {
-                self.status_message = Some("Port must be between 1 and 65535".into());
+                self.status_message = Some(self.tr(Msg::InvalidPortRange).into());
                 return;
             }
             Ok(p) => p,
             Err(_) => {
-                self.status_message = Some(format!(
-                    "Invalid port '{}': must be a number 1-65535",
-                    form.port
-                ));
+                self.status_message = Some(self.trf(Msg::InvalidPort, &[("port", &form.port)]));
                 return;
             }
         };
 
         if form.name.trim().is_empty() {
-            self.status_message = Some("Name cannot be empty".into());
+            self.status_message = Some(self.tr(Msg::NameEmpty).into());
             return;
         }
         if form.domain.trim().is_empty() {
-            self.status_message = Some("Domain cannot be empty".into());
+            self.status_message = Some(self.tr(Msg::DomainEmpty).into());
             return;
         }
         if !std::path::Path::new(&form.path).is_dir() {
-            self.status_message = Some(format!("Directory not found: {}", form.path));
+            self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
             return;
         }
 
@@ -1287,12 +1369,12 @@ impl App {
                 continue;
             }
             if project.config.name == form.name {
-                self.status_message = Some(format!("Project '{}' already exists", form.name));
+                self.status_message = Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
                 return;
             }
             if project.config.port == port {
                 self.status_message =
-                    Some(format!("Port {} is already used by another project", port));
+                    Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
                 return;
             }
         }
@@ -1307,6 +1389,9 @@ impl App {
         }
 
         let existing = self.projects[form.project_index].config.clone();
+        let spec = self.frameworks.get(&project_type);
+        let uses_php = spec.map(|s| s.uses_php()).unwrap_or(false);
+        let is_compose = spec.map(|s| s.is_compose()).unwrap_or(false);
         let updated = ProjectConfig {
             name: form.name.clone(),
             domain: form.domain,
@@ -1314,24 +1399,20 @@ impl App {
             port,
             project_type: project_type.clone(),
             path: form.path,
-            php_version: if project_type == ProjectType::Kirby {
+            php_version: if uses_php {
                 existing.php_version.or_else(|| Some("8.3".into()))
             } else {
                 None
             },
             public_dir: existing.public_dir,
             command: existing.command,
-            compose_file: if project_type == ProjectType::Compose {
+            compose_file: if is_compose {
                 existing.compose_file
             } else {
                 None
             },
-            service: if project_type == ProjectType::Compose {
-                existing.service
-            } else {
-                None
-            },
-            compose_profiles: if project_type == ProjectType::Compose {
+            service: if is_compose { existing.service } else { None },
+            compose_profiles: if is_compose {
                 existing.compose_profiles
             } else {
                 vec![]
@@ -1346,18 +1427,18 @@ impl App {
         self.projects[form.project_index].config = updated;
 
         if let Err(e) = self.save_config() {
-            self.status_message = Some(format!("Updated but could not save config: {}", e));
+            self.status_message = Some(self.trf(Msg::UpdatedUnsaved, &[("error", &e.to_string())]));
             return;
         }
 
         self.ensure_caddy().await;
         self.refresh_unmanaged().await;
-        self.status_message = Some(format!("Updated {}", form.name));
+        self.status_message = Some(self.trf(Msg::Updated, &[("name", &form.name)]));
     }
 
     pub fn edit_form_error(&self, form: &EditForm) -> Option<String> {
         if form.name.trim().is_empty() {
-            return Some("Name cannot be empty".into());
+            return Some(self.tr(Msg::NameEmpty).into());
         }
         if self
             .projects
@@ -1365,11 +1446,11 @@ impl App {
             .enumerate()
             .any(|(idx, p)| idx != form.project_index && p.config.name == form.name)
         {
-            return Some(format!("Project '{}' already exists", form.name));
+            return Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
         }
 
         if form.domain.trim().is_empty() {
-            return Some("Domain cannot be empty".into());
+            return Some(self.tr(Msg::DomainEmpty).into());
         }
         let aliases = parse_aliases(&form.aliases);
         let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
@@ -1381,7 +1462,7 @@ impl App {
 
         let port = match form.port.parse::<u16>() {
             Ok(port) => port,
-            Err(_) => return Some(format!("Invalid port: {}", form.port)),
+            Err(_) => return Some(self.trf(Msg::InvalidPort, &[("port", &form.port)])),
         };
         if self
             .projects
@@ -1389,32 +1470,33 @@ impl App {
             .enumerate()
             .any(|(idx, p)| idx != form.project_index && p.config.port == port)
         {
-            return Some(format!("Port {} is already used by another project", port));
+            return Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
         }
         if let Some(host) = parse_upstream_host(&form.upstream_host) {
             if !is_valid_upstream_host(&host) {
-                return Some(format!("Invalid upstream host: {}", host));
+                return Some(self.trf(Msg::InvalidUpstream, &[("host", &host)]));
             }
         }
 
         if form.path.trim().is_empty() {
-            return Some("Project directory cannot be empty".into());
+            return Some(self.tr(Msg::DirEmpty).into());
         }
         if !std::path::Path::new(&form.path).is_dir() {
-            return Some(format!("Directory not found: {}", form.path));
+            return Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
         }
 
         None
     }
 
     pub async fn refresh_unmanaged(&mut self) {
-        match discover_services(Some(&self.config)).await {
+        match discover_services(Some(&self.config), Some(&self.frameworks)).await {
             Ok(services) => {
                 self.unmanaged_all_services = services.into_iter().filter(|s| !s.managed).collect();
                 self.apply_unmanaged_filter();
             }
             Err(e) => {
-                self.status_message = Some(format!("Discovery failed: {}", e));
+                self.status_message =
+                    Some(self.trf(Msg::DiscoveryFailed, &[("error", &e.to_string())]));
             }
         }
     }
@@ -1435,7 +1517,7 @@ impl App {
         self.unmanaged_services = self
             .unmanaged_all_services
             .iter()
-            .filter(|s| self.unmanaged_show_unknown || !matches!(s.stack, StackKind::Unknown))
+            .filter(|s| self.unmanaged_show_unknown || !s.stack.is_unknown())
             .filter(|s| !self.unmanaged_web_only || matches_port_rule(s.port, &web_rules))
             .cloned()
             .collect();
@@ -1451,9 +1533,9 @@ impl App {
         self.unmanaged_show_unknown = !self.unmanaged_show_unknown;
         self.apply_unmanaged_filter();
         self.status_message = Some(if self.unmanaged_show_unknown {
-            "Unmanaged filter: showing all stacks".into()
+            self.tr(Msg::FilterAllStacks).into()
         } else {
-            "Unmanaged filter: showing php/elixir/rust only".into()
+            self.tr(Msg::FilterDevStacks).into()
         });
     }
 
@@ -1461,9 +1543,9 @@ impl App {
         self.unmanaged_web_only = !self.unmanaged_web_only;
         self.apply_unmanaged_filter();
         self.status_message = Some(if self.unmanaged_web_only {
-            "Unmanaged filter: web-ish ports only".into()
+            self.tr(Msg::FilterWebPorts).into()
         } else {
-            "Unmanaged filter: all ports".into()
+            self.tr(Msg::FilterAllPortsMsg).into()
         });
     }
 
@@ -1490,14 +1572,13 @@ impl App {
         self.show_unmanaged_popup = !self.show_unmanaged_popup;
         self.show_unmanaged_detail = false;
         if self.show_unmanaged_popup {
-            self.status_message =
-                Some("Unmanaged: Enter inspect, i import, I ignore, f stack, w ports".into());
+            self.status_message = Some(self.tr(Msg::UnmanagedHint).into());
         }
     }
 
     pub async fn import_selected_unmanaged(&mut self) {
         let Some(service) = self.selected_unmanaged().cloned() else {
-            self.status_message = Some("No unmanaged service selected".into());
+            self.status_message = Some(self.tr(Msg::UnmanagedNoneSelected).into());
             return;
         };
 
@@ -1507,26 +1588,26 @@ impl App {
             .map(|p| std::path::Path::new(p).is_dir())
             != Some(true)
         {
-            self.status_message = Some(format!(
-                "Cannot import pid {}: working directory unavailable",
-                service.pid
-            ));
+            self.status_message =
+                Some(self.trf(Msg::ImportNoCwd, &[("pid", &service.pid.to_string())]));
             return;
         }
         if self.projects.iter().any(|p| p.config.port == service.port) {
-            self.status_message = Some(format!("Port {} already exists in config", service.port));
+            self.status_message =
+                Some(self.trf(Msg::PortInUse, &[("port", &service.port.to_string())]));
             return;
         }
 
         let base_name = self.base_name_for_service(&service);
         let name = self.unique_project_name(&base_name);
         let domain = self.unique_domain_for_name(&name);
-        let (project_type, php_version) = match service.stack {
-            StackKind::Php => (ProjectType::Symfony, None),
-            StackKind::Elixir => (ProjectType::Phoenix, None),
-            StackKind::Rust => (ProjectType::Axum, None),
-            StackKind::Unknown => (ProjectType::Axum, None),
+        let guessed = service.stack.label();
+        let project_type = if self.frameworks.contains(guessed) {
+            FrameworkId::new(guessed)
+        } else {
+            FrameworkId::new("axum")
         };
+        let php_version = None;
 
         let (command, args) = if let Some(cmdline) = &service.command_line {
             match shell_words::split(cmdline) {
@@ -1561,18 +1642,22 @@ impl App {
         self.selected = self.projects.len().saturating_sub(1);
 
         if let Err(e) = self.save_config() {
-            self.status_message = Some(format!("Imported but failed to save config: {}", e));
+            self.status_message =
+                Some(self.trf(Msg::ImportSaveFailed, &[("error", &e.to_string())]));
             return;
         }
 
         self.ensure_caddy().await;
         self.refresh_unmanaged().await;
-        self.status_message = Some(format!("Imported {} from port {}", name, service.port));
+        self.status_message = Some(self.trf(
+            Msg::Imported,
+            &[("name", &name), ("port", &service.port.to_string())],
+        ));
     }
 
     pub async fn ignore_selected_unmanaged(&mut self) {
         let Some(service) = self.selected_unmanaged().cloned() else {
-            self.status_message = Some("No unmanaged service selected".into());
+            self.status_message = Some(self.tr(Msg::UnmanagedNoneSelected).into());
             return;
         };
 
@@ -1588,14 +1673,18 @@ impl App {
         }
 
         if let Err(e) = self.save_config() {
-            self.status_message = Some(format!("Failed to save ignore list: {}", e));
+            self.status_message =
+                Some(self.trf(Msg::IgnoreSaveFailed, &[("error", &e.to_string())]));
             return;
         }
 
         self.refresh_unmanaged().await;
-        self.status_message = Some(format!(
-            "Ignored {} on port {}",
-            service.command, service.port
+        self.status_message = Some(self.trf(
+            Msg::Ignored,
+            &[
+                ("command", &service.command),
+                ("port", &service.port.to_string()),
+            ],
         ));
     }
 
@@ -1663,9 +1752,167 @@ impl App {
         )
     }
 
+    fn prime_config_watch(&mut self) {
+        let path = config_path();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            self.config_mtime = meta.modified().ok();
+            self.config_len = meta.len();
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            self.config_hash = hash_config_bytes(&bytes);
+        }
+    }
+
+    fn record_applied_config(&mut self, bytes: &[u8]) {
+        self.config_hash = hash_config_bytes(bytes);
+        if let Ok(meta) = std::fs::metadata(config_path()) {
+            self.config_mtime = meta.modified().ok();
+            self.config_len = meta.len();
+        }
+    }
+
+    async fn poll_config_reload(&mut self) -> bool {
+        if self.add_form.is_some() || self.edit_form.is_some() || self.confirm_dialog.is_some() {
+            return false;
+        }
+        if self.last_config_poll.elapsed() < Duration::from_millis(500) {
+            return false;
+        }
+        self.last_config_poll = Instant::now();
+
+        let path = config_path();
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return false;
+        };
+        let mtime = meta.modified().ok();
+        let len = meta.len();
+        if mtime == self.config_mtime && len == self.config_len {
+            return false;
+        }
+
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status_message =
+                    Some(self.trf(Msg::ConfigReloadRead, &[("error", &e.to_string())]));
+                return true;
+            }
+        };
+        self.config_mtime = mtime;
+        self.config_len = len;
+        let hash = hash_config_bytes(&bytes);
+        if hash == self.config_hash {
+            return false;
+        }
+        self.config_hash = hash;
+
+        match toml::from_str::<Config>(&String::from_utf8_lossy(&bytes)) {
+            Ok(new) => self.apply_external_config(new).await,
+            Err(e) => {
+                self.status_message =
+                    Some(self.trf(Msg::ConfigReloadParse, &[("error", &e.to_string())]));
+                true
+            }
+        }
+    }
+
+    /// Merge an externally-edited config into the live TUI. Identity is project name.
+    /// Running processes are not started or stopped.
+    pub(crate) async fn apply_external_config(&mut self, new: Config) -> bool {
+        let selected_name = self.selected_project().map(|p| p.config.name.clone());
+
+        let mut by_name: HashMap<String, Project> = self
+            .projects
+            .drain(..)
+            .map(|p| (p.config.name.clone(), p))
+            .collect();
+
+        let mut needs_caddy = new.caddy != self.config.caddy;
+        let mut restart_names = Vec::new();
+        let mut forgotten = Vec::new();
+
+        let mut next = Vec::with_capacity(new.projects.len());
+        for cfg in &new.projects {
+            if let Some(mut existing) = by_name.remove(&cfg.name) {
+                if existing.is_running() && start_relevant_changed(&existing.config, cfg) {
+                    restart_names.push(cfg.name.clone());
+                }
+                if proxy_relevant_changed(&existing.config, cfg) {
+                    needs_caddy = true;
+                }
+                existing.config = cfg.clone();
+                next.push(existing);
+            } else {
+                next.push(Project::new(cfg.clone()));
+                needs_caddy = true;
+            }
+        }
+
+        for (name, leftover) in by_name {
+            if leftover.is_running() || self.manager.is_running(&name) {
+                self.manager.forget(&name);
+                forgotten.push(name);
+            }
+            needs_caddy = true;
+        }
+
+        self.projects = next;
+
+        if let Some(name) = selected_name {
+            if let Some(idx) = self.projects.iter().position(|p| p.config.name == name) {
+                self.selected = idx;
+            } else {
+                self.selected = self.selected.min(self.projects.len().saturating_sub(1));
+            }
+        } else {
+            self.selected = 0;
+        }
+
+        let theme_changed = self.config.theme != new.theme;
+        let discovery_changed = self.config.discovery != new.discovery
+            || self.config.ignored_services != new.ignored_services;
+        let tld_changed = self.config.tld != new.tld;
+        if let Some(lang) = new.language {
+            self.lang = lang;
+        }
+
+        self.config.tld = new.tld;
+        self.config.caddy = new.caddy;
+        self.config.discovery = new.discovery;
+        self.config.ignored_services = new.ignored_services;
+        self.config.theme = new.theme;
+        self.config.language = new.language;
+        self.config.projects = self.projects.iter().map(|p| p.config.clone()).collect();
+
+        if theme_changed {
+            crate::tui::ui::init_theme(self.config.theme.as_ref());
+        }
+        if needs_caddy {
+            let _ = self.ensure_caddy().await;
+        }
+        if discovery_changed {
+            self.refresh_unmanaged().await;
+        }
+
+        let mut parts = vec![self.tr(Msg::ConfigReloaded).to_string()];
+        if !restart_names.is_empty() {
+            let names = restart_names.join(", ");
+            parts.push(self.trf(Msg::ConfigReloadRestart, &[("name", &names)]));
+        }
+        if tld_changed {
+            parts.push(self.tr(Msg::ConfigReloadTld).into());
+        }
+        if !forgotten.is_empty() {
+            let names = forgotten.join(", ");
+            parts.push(self.trf(Msg::ConfigReloadForgotten, &[("name", &names)]));
+        }
+        self.status_message = Some(parts.join(" — "));
+        true
+    }
+
     /// Rewrite config.toml from current state.
     /// Uses atomic write (temp file + rename) to prevent corruption on interruption.
-    fn save_config(&self) -> Result<()> {
+    fn save_config(&mut self) -> Result<()> {
         let path = config_path();
         let serialized = Config {
             tld: self.config.tld.clone(),
@@ -1674,6 +1921,7 @@ impl App {
             discovery: self.config.discovery.clone(),
             ignored_services: self.config.ignored_services.clone(),
             theme: self.config.theme.clone(),
+            language: Some(self.lang),
         };
         let mut out = String::from("# zapusk config\n\n");
         out.push_str(&toml::to_string_pretty(&serialized)?);
@@ -1682,16 +1930,17 @@ impl App {
         let tmp_path = path.with_extension("toml.tmp");
         std::fs::write(&tmp_path, &out)?;
         std::fs::rename(&tmp_path, &path)?;
+        self.record_applied_config(out.as_bytes());
         Ok(())
     }
 
     pub(crate) async fn quit(&mut self) {
-        self.status_message = Some("Exiting TUI (running processes stay running)…".into());
+        self.status_message = Some(self.tr(Msg::SoftQuit).into());
         self.should_quit = true;
     }
 
     pub(crate) async fn force_quit(&mut self) {
-        self.status_message = Some("Force quitting: stopping projects/services...".into());
+        self.status_message = Some(self.tr(Msg::ForceQuit).into());
         self.manager.stop_all().await;
 
         let mut notes: Vec<String> = vec![];
@@ -1711,7 +1960,7 @@ impl App {
         }
 
         self.should_quit = true;
-        self.status_message = Some(format!("Force quit complete: {}", notes.join(", ")));
+        self.status_message = Some(self.trf(Msg::ForceQuitDone, &[("notes", &notes.join(", "))]));
     }
 
     /// Logs for the currently selected project, optionally filtered by search query
@@ -1831,18 +2080,36 @@ async fn detect_dnsmasq_state(tld: &str) -> ServiceState {
     }
 }
 
-async fn verify_project_domain_static(config: &ProjectConfig) -> Result<u16, String> {
+fn start_relevant_changed(old: &ProjectConfig, new: &ProjectConfig) -> bool {
+    old.path != new.path
+        || old.project_type != new.project_type
+        || old.command != new.command
+        || old.args != new.args
+        || old.env != new.env
+        || old.port != new.port
+        || old.compose_file != new.compose_file
+        || old.service != new.service
+        || old.compose_profiles != new.compose_profiles
+}
+
+fn proxy_relevant_changed(old: &ProjectConfig, new: &ProjectConfig) -> bool {
+    old.domain != new.domain
+        || old.aliases != new.aliases
+        || old.tls != new.tls
+        || old.upstream_host != new.upstream_host
+}
+
+async fn verify_project_domain_static(
+    config: &ProjectConfig,
+    ready_attempts: u32,
+) -> Result<u16, String> {
     let scheme = if config.tls { "https" } else { "http" };
     let url = format!("{}://{}", scheme, config.domain);
     let mut last_error = String::from("unreachable");
 
     // Compose stacks take longer to come up (image pulls, db init) than
     // native processes — give them a much wider verification window.
-    let attempts = if config.project_type == ProjectType::Compose {
-        40
-    } else {
-        8
-    };
+    let attempts = ready_attempts;
 
     for _ in 0..attempts {
         let mut cmd = Command::new("curl");
@@ -1913,13 +2180,13 @@ fn app_diag_log(message: &str) {
 mod tests {
     use super::*;
 
-    fn project(name: &str, port: u16, ptype: ProjectType) -> ProjectConfig {
+    fn project(name: &str, port: u16, ptype: &str) -> ProjectConfig {
         ProjectConfig {
             name: name.into(),
             domain: format!("{}.test", name),
             aliases: vec![],
             port,
-            project_type: ptype,
+            project_type: FrameworkId::new(ptype),
             path: "/tmp".into(),
             php_version: None,
             public_dir: None,
@@ -1943,6 +2210,7 @@ mod tests {
             discovery: None,
             ignored_services: vec![],
             theme: None,
+            language: None,
         };
         App::new(config)
     }
@@ -1970,10 +2238,10 @@ mod tests {
     #[test]
     fn display_order_groups_running_then_stopped_alphabetically() {
         let mut app = app_with(vec![
-            project("zeta", 1, ProjectType::Phoenix),
-            project("beta", 2, ProjectType::Axum),
-            project("alpha", 3, ProjectType::Phoenix),
-            project("gamma", 4, ProjectType::Axum),
+            project("zeta", 1, "phoenix"),
+            project("beta", 2, "axum"),
+            project("alpha", 3, "phoenix"),
+            project("gamma", 4, "axum"),
         ]);
         // running: zeta, gamma — stopped: alpha, beta
         set_running(&mut app, "zeta", true);
@@ -1989,8 +2257,8 @@ mod tests {
     #[test]
     fn display_order_does_not_reorder_underlying_vec() {
         let mut app = app_with(vec![
-            project("zeta", 1, ProjectType::Phoenix),
-            project("beta", 2, ProjectType::Axum),
+            project("zeta", 1, "phoenix"),
+            project("beta", 2, "axum"),
         ]);
         set_running(&mut app, "beta", true);
 
@@ -2003,14 +2271,18 @@ mod tests {
     #[test]
     fn navigation_follows_display_order() {
         let mut app = app_with(vec![
-            project("zeta", 1, ProjectType::Phoenix),
-            project("beta", 2, ProjectType::Axum),
-            project("alpha", 3, ProjectType::Phoenix),
+            project("zeta", 1, "phoenix"),
+            project("beta", 2, "axum"),
+            project("alpha", 3, "phoenix"),
         ]);
         set_running(&mut app, "zeta", true); // only running one -> top of list
 
         // Start at the first display row (zeta), then step down twice.
-        let zeta = app.projects.iter().position(|p| p.config.name == "zeta").unwrap();
+        let zeta = app
+            .projects
+            .iter()
+            .position(|p| p.config.name == "zeta")
+            .unwrap();
         app.selected = zeta;
         // display order: zeta (running), then alpha, beta (stopped, alphabetical)
         app.select_next();
@@ -2019,5 +2291,93 @@ mod tests {
         assert_eq!(app.selected_project().unwrap().config.name, "beta");
         app.select_next(); // wraps back to top
         assert_eq!(app.selected_project().unwrap().config.name, "zeta");
+    }
+
+    fn config_from(projects: Vec<ProjectConfig>) -> Config {
+        Config {
+            tld: "test".into(),
+            projects,
+            caddy: None,
+            discovery: None,
+            ignored_services: vec![],
+            theme: None,
+            language: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_adds_stopped_project_without_autostart() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        let mut incoming = project("beta", 2, "axum");
+        incoming.autostart = true;
+        app.apply_external_config(config_from(vec![project("alpha", 1, "phoenix"), incoming]))
+            .await;
+        assert_eq!(app.projects.len(), 2);
+        let beta = app
+            .projects
+            .iter()
+            .find(|p| p.config.name == "beta")
+            .unwrap();
+        assert!(!beta.is_running());
+        assert_eq!(beta.status, ProjectStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn reload_removes_stopped_project_and_clamps_selection() {
+        let mut app = app_with(vec![
+            project("alpha", 1, "phoenix"),
+            project("beta", 2, "axum"),
+        ]);
+        app.selected = 1;
+        app.apply_external_config(config_from(vec![project("alpha", 1, "phoenix")]))
+            .await;
+        assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.selected_project().unwrap().config.name, "alpha");
+    }
+
+    #[tokio::test]
+    async fn reload_forgets_running_project_without_keeping_it_tracked() {
+        let mut app = app_with(vec![
+            project("alpha", 1, "phoenix"),
+            project("beta", 2, "axum"),
+        ]);
+        set_running(&mut app, "beta", true);
+        app.manager.track_for_test("beta");
+        assert!(app.manager.is_running("beta"));
+
+        app.apply_external_config(config_from(vec![project("alpha", 1, "phoenix")]))
+            .await;
+
+        assert_eq!(app.projects.len(), 1);
+        assert!(!app.manager.is_running("beta"));
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("beta left running")
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_updates_port_on_running_project_and_keeps_status() {
+        let mut app = app_with(vec![project("alpha", 4000, "phoenix")]);
+        set_running(&mut app, "alpha", true);
+        let mut updated = project("alpha", 4001, "phoenix");
+        updated.path = "/tmp/moved".into();
+        app.apply_external_config(config_from(vec![updated])).await;
+
+        assert_eq!(app.projects[0].config.port, 4001);
+        assert_eq!(app.projects[0].status, ProjectStatus::Running);
+        let msg = app.status_message.as_deref().unwrap_or("");
+        assert!(msg.contains("restart alpha"));
+    }
+
+    #[test]
+    fn hash_equality_is_stable_for_same_bytes() {
+        let a = hash_config_bytes(b"hello");
+        let b = hash_config_bytes(b"hello");
+        let c = hash_config_bytes(b"world");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

@@ -4,24 +4,25 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use crate::core::config::Config;
+use crate::core::framework::FrameworkRegistry;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StackKind {
-    Php,
-    Elixir,
-    Rust,
-    Unknown,
-}
+/// Guessed stack for a discovered listener. The label is a framework id
+/// (`phoenix`, `rails`, …) or `"unknown"`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct StackKind(pub String);
 
 impl StackKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            StackKind::Php => "php",
-            StackKind::Elixir => "elixir",
-            StackKind::Rust => "rust",
-            StackKind::Unknown => "unknown",
-        }
+    pub fn unknown() -> Self {
+        Self("unknown".into())
+    }
+
+    pub fn label(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.0 == "unknown"
     }
 }
 
@@ -37,7 +38,10 @@ pub struct ServiceInfo {
     pub managed_by: Option<String>,
 }
 
-pub async fn discover_services(config: Option<&Config>) -> Result<Vec<ServiceInfo>> {
+pub async fn discover_services(
+    config: Option<&Config>,
+    frameworks: Option<&FrameworkRegistry>,
+) -> Result<Vec<ServiceInfo>> {
     let Some(output) =
         run_command_timeout("lsof", &["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"], 1800).await
     else {
@@ -62,6 +66,7 @@ pub async fn discover_services(config: Option<&Config>) -> Result<Vec<ServiceInf
             &entry.command,
             entry.command_line.as_deref(),
             entry.cwd.as_deref(),
+            frameworks,
         );
 
         if let Some(cfg) = config {
@@ -122,7 +127,7 @@ fn parse_lsof_listeners(text: &str) -> Vec<ServiceInfo> {
                         command,
                         command_line: None,
                         cwd: None,
-                        stack: StackKind::Unknown,
+                        stack: StackKind::unknown(),
                         managed: false,
                         managed_by: None,
                     });
@@ -170,7 +175,12 @@ async fn process_cwd(pid: u32) -> Option<String> {
     None
 }
 
-fn guess_stack(command: &str, command_line: Option<&str>, cwd: Option<&str>) -> StackKind {
+fn guess_stack(
+    command: &str,
+    command_line: Option<&str>,
+    cwd: Option<&str>,
+    frameworks: Option<&FrameworkRegistry>,
+) -> StackKind {
     let mut hay = command.to_lowercase();
     if let Some(line) = command_line {
         hay.push(' ');
@@ -181,15 +191,12 @@ fn guess_stack(command: &str, command_line: Option<&str>, cwd: Option<&str>) -> 
         hay.push_str(&dir.to_lowercase());
     }
 
-    if hay.contains("php") || hay.contains("symfony") {
-        StackKind::Php
-    } else if hay.contains("beam.smp") || hay.contains("elixir") || hay.contains("mix") {
-        StackKind::Elixir
-    } else if hay.contains("cargo") || hay.contains("rust") || hay.contains("/target/debug/") {
-        StackKind::Rust
-    } else {
-        StackKind::Unknown
+    if let Some(reg) = frameworks {
+        if let Some(id) = reg.match_discovery(&hay) {
+            return StackKind(id.to_string());
+        }
     }
+    StackKind::unknown()
 }
 
 async fn run_command_timeout(
