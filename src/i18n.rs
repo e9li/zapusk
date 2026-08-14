@@ -38,16 +38,14 @@ impl Language {
         }
     }
 
-    pub fn next(self) -> Self {
-        match self {
-            Language::En => Language::De,
-            Language::De => Language::Fr,
-            Language::Fr => Language::It,
-            Language::It => Language::Sr,
-            Language::Sr => Language::Ru,
-            Language::Ru => Language::En,
-        }
-    }
+    pub const ALL: [Language; 6] = [
+        Language::En,
+        Language::De,
+        Language::Fr,
+        Language::It,
+        Language::Sr,
+        Language::Ru,
+    ];
 
     /// Best-effort from `LC_ALL` / `LC_MESSAGES` / `LANG`.
     pub fn from_env() -> Self {
@@ -114,7 +112,6 @@ pub enum Msg {
     Details,
     Logs,
     Unmanaged,
-    Services,
     Keybindings,
     Confirm,
     ProjectDetails,
@@ -124,7 +121,6 @@ pub enum Msg {
     PressAToAdd,
     OrRunZapuskAdd,
     NoProjectSelected,
-    NonePressU,
     UnmanagedCount,
     // hints
     HintStart,
@@ -137,6 +133,8 @@ pub enum Msg {
     HintHelp,
     HintQuit,
     HintLang,
+    HintTheme,
+    HintSelect,
     // status words
     StatusStopped,
     StatusStarting,
@@ -151,6 +149,7 @@ pub enum Msg {
     TlsOn,
     TlsOff,
     Yes,
+    No,
     // field labels
     LabelName,
     LabelDomain,
@@ -197,6 +196,9 @@ pub enum Msg {
     HelpQuitSoft,
     HelpQuitHard,
     HelpLanguage,
+    LanguagePicker,
+    HelpTheme,
+    ThemePicker,
     HelpClose,
     DetailRemoveHint,
     DetailCloseHint,
@@ -220,6 +222,7 @@ pub enum Msg {
     AddingProject,
     EditingProject,
     LanguageSet,
+    ThemeSet,
     ConfirmStop,
     ConfirmRemove,
     NotRunning,
@@ -298,7 +301,6 @@ impl Msg {
             Msg::Details => "details",
             Msg::Logs => "logs",
             Msg::Unmanaged => "unmanaged",
-            Msg::Services => "services",
             Msg::Keybindings => "keybindings",
             Msg::Confirm => "confirm",
             Msg::ProjectDetails => "project_details",
@@ -308,7 +310,6 @@ impl Msg {
             Msg::PressAToAdd => "press_a_to_add",
             Msg::OrRunZapuskAdd => "or_run_zapusk_add",
             Msg::NoProjectSelected => "no_project_selected",
-            Msg::NonePressU => "none_press_u",
             Msg::UnmanagedCount => "unmanaged_count",
             Msg::HintStart => "hint_start",
             Msg::HintStop => "hint_stop",
@@ -320,6 +321,8 @@ impl Msg {
             Msg::HintHelp => "hint_help",
             Msg::HintQuit => "hint_quit",
             Msg::HintLang => "hint_lang",
+            Msg::HintTheme => "hint_theme",
+            Msg::HintSelect => "hint_select",
             Msg::StatusStopped => "status_stopped",
             Msg::StatusStarting => "status_starting",
             Msg::StatusRunning => "status_running",
@@ -333,6 +336,7 @@ impl Msg {
             Msg::TlsOn => "tls_on",
             Msg::TlsOff => "tls_off",
             Msg::Yes => "yes",
+            Msg::No => "no",
             Msg::LabelName => "label_name",
             Msg::LabelDomain => "label_domain",
             Msg::LabelAlias => "label_alias",
@@ -377,6 +381,9 @@ impl Msg {
             Msg::HelpQuitSoft => "help_quit_soft",
             Msg::HelpQuitHard => "help_quit_hard",
             Msg::HelpLanguage => "help_language",
+            Msg::LanguagePicker => "language_picker",
+            Msg::HelpTheme => "help_theme",
+            Msg::ThemePicker => "theme_picker",
             Msg::HelpClose => "help_close",
             Msg::DetailRemoveHint => "detail_remove_hint",
             Msg::DetailCloseHint => "detail_close_hint",
@@ -399,6 +406,7 @@ impl Msg {
             Msg::AddingProject => "adding_project",
             Msg::EditingProject => "editing_project",
             Msg::LanguageSet => "language_set",
+            Msg::ThemeSet => "theme_set",
             Msg::ConfirmStop => "confirm_stop",
             Msg::ConfirmRemove => "confirm_remove",
             Msg::NotRunning => "not_running",
@@ -534,7 +542,6 @@ const ALL_MSGS: &[Msg] = &[
     Msg::Details,
     Msg::Logs,
     Msg::Unmanaged,
-    Msg::Services,
     Msg::Keybindings,
     Msg::Confirm,
     Msg::ProjectDetails,
@@ -544,7 +551,6 @@ const ALL_MSGS: &[Msg] = &[
     Msg::PressAToAdd,
     Msg::OrRunZapuskAdd,
     Msg::NoProjectSelected,
-    Msg::NonePressU,
     Msg::UnmanagedCount,
     Msg::HintStart,
     Msg::HintStop,
@@ -556,6 +562,8 @@ const ALL_MSGS: &[Msg] = &[
     Msg::HintHelp,
     Msg::HintQuit,
     Msg::HintLang,
+    Msg::HintTheme,
+    Msg::HintSelect,
     Msg::StatusStopped,
     Msg::StatusStarting,
     Msg::StatusRunning,
@@ -569,6 +577,7 @@ const ALL_MSGS: &[Msg] = &[
     Msg::TlsOn,
     Msg::TlsOff,
     Msg::Yes,
+    Msg::No,
     Msg::LabelName,
     Msg::LabelDomain,
     Msg::LabelAlias,
@@ -613,6 +622,9 @@ const ALL_MSGS: &[Msg] = &[
     Msg::HelpQuitSoft,
     Msg::HelpQuitHard,
     Msg::HelpLanguage,
+    Msg::LanguagePicker,
+    Msg::HelpTheme,
+    Msg::ThemePicker,
     Msg::HelpClose,
     Msg::DetailRemoveHint,
     Msg::DetailCloseHint,
@@ -635,6 +647,7 @@ const ALL_MSGS: &[Msg] = &[
     Msg::AddingProject,
     Msg::EditingProject,
     Msg::LanguageSet,
+    Msg::ThemeSet,
     Msg::ConfirmStop,
     Msg::ConfirmRemove,
     Msg::NotRunning,
@@ -762,10 +775,9 @@ mod tests {
         assert_eq!("it".parse::<Language>().unwrap(), Language::It);
         assert_eq!("sr".parse::<Language>().unwrap(), Language::Sr);
         assert_eq!("ru".parse::<Language>().unwrap(), Language::Ru);
-        assert_eq!(Language::En.next(), Language::De);
-        assert_eq!(Language::De.next(), Language::Fr);
-        assert_eq!(Language::It.next(), Language::Sr);
-        assert_eq!(Language::Ru.next(), Language::En);
+        assert_eq!(Language::ALL[0], Language::En);
+        assert_eq!(Language::ALL[1], Language::De);
+        assert_eq!(*Language::ALL.last().unwrap(), Language::Ru);
     }
 
     #[test]
