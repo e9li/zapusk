@@ -172,10 +172,7 @@ impl App {
         // Language picker
         if self.show_language_popup {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('l') => {
-                    self.show_language_popup = false;
-                    self.status_message = Some(self.tr(Msg::Cancelled).into());
-                }
+                KeyCode::Esc | KeyCode::Char('l') => self.cancel_language_picker(),
                 KeyCode::Down | KeyCode::Char('j') => self.select_language_next(),
                 KeyCode::Up | KeyCode::Char('k') => self.select_language_prev(),
                 KeyCode::Enter => self.apply_language_selection(),

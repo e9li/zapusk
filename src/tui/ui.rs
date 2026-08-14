@@ -800,7 +800,11 @@ fn draw_language_picker(frame: &mut Frame, app: &App) {
 
     let mut items: Vec<ListItem> = Vec::new();
     for lang in Language::ALL {
-        let current = if lang == app.lang { " \u{2713}" } else { "" };
+        let current = if lang == app.saved_language() {
+            " \u{2713}"
+        } else {
+            ""
+        };
         let line = Line::from(vec![
             Span::styled(
                 format!(" {:<12}", lang.native_name()),
