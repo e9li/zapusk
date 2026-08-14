@@ -365,7 +365,8 @@ Setup complete. Run `zapusk` to open the TUI.
 | `j/k` or `↑/↓` | Navigate project list |
 | `PgUp/PgDn` | Scroll logs |
 | `G` or `End` | Jump to latest logs |
-| `l` | Cycle UI language (English → Deutsch → Français → Italiano → Srpski → Русский) |
+| `l` | Open the language picker (English, Deutsch, Français, Italiano, Srpski, Русский) |
+| `t` | Open the theme picker (shipped palettes plus `~/.config/zapusk/themes/`) |
 | `q` | Quit (keeps running projects alive) |
 | `Q` | Force quit (stops projects, then tries to stop Caddy/dnsmasq) |
 
@@ -373,8 +374,10 @@ Inside the unmanaged services popup (`u`): `j/k` select, `Enter` inspect,
 `i` import as project, `I` ignore, `f` toggle stack filter (`dev-only`/`all`),
 `w` toggle port filter (`web`/`all-ports`), `r` refresh, `Esc` close.
 
-Left pane sections: Projects (top), Unmanaged summary (middle), Services health
-(bottom: Caddy/dnsmasq as running/paused/stopped).
+Layout: a quiet header (`zapusk | N projects | Caddy/dnsmasq`), projects +
+details on the left, logs on the right, a `>` prompt row, and a footer of
+`key:label  |  key:label` shortcuts. Unmanaged listeners show as a header
+count and open with `u`.
 
 Project list badges: `[M]` = managed by zapusk, `[A]` = adopted external process.
 
@@ -563,28 +566,60 @@ web_ports = ["80", "443", "8080", "8443", "3000-9999"]
 port = 3306
 command = "mariadbd"
 
-# Optional: override TUI colors. Values are hex strings (#rrggbb) or named
-# terminal colors (red, green, cyan, white, darkgray, lightgreen, …).
-# All fields are optional — omit to keep the default.
+# Color theme. `name` picks a palette; other keys overlay it.
 [theme]
-border        = "#3c3c50"  # unfocused pane borders
-border_focus  = "#96c832"  # focused pane border (lime green)
-text          = "#c8c8d2"  # primary text
-text_dim      = "#646478"  # timestamps, labels, key hints
-accent        = "#78b4dc"  # project type, port numbers
-ok            = "#64c864"  # running status, managed badge
-warn          = "#dcb43c"  # warnings, adopted badge, stderr lines
-err           = "#dc5a5a"  # errors, failed status
-highlight_bg  = "#282837"  # selected-item background
+name          = "groknight"  # groknight | terminal | nightfox | catppuccin | macintosh | macintosh-dark | user id
+bg            = "#141414"  # application canvas
+border        = "#414141"  # unfocused pane borders
+border_focus  = "#bb9af7"  # focused pane
+text          = "#e1e1e1"  # primary text
+text_dim      = "#6c6c6c"  # timestamps, labels, key hints
+accent        = "#bb9af7"  # titles, keys, project type
+ok            = "#9ece6a"  # running status, managed badge
+warn          = "#e0af68"  # warnings, adopted badge, stderr
+err           = "#f7768e"  # errors, failed status
+highlight_bg  = "#242424"  # selected-item background
+highlight_fg  = "#e1e1e1"  # selected-item text (omit to use `text`)
 ```
 
 ---
 
-### Deploy locally
+## Themes
+
+Shipped palettes:
+
+| Name | What it does |
+|------|----------------|
+| **groknight** | Default. Near-black canvas, magenta accent (Grok Build). |
+| **terminal** | Uses the terminal's own background/foreground and 16 ANSI colors, so zapusk follows iTerm, Ghostty, Alacritty, … |
+| **nightfox** | EdenEast Nightfox — deep blue-gray canvas, purple accent. |
+| **catppuccin** | Catppuccin Mocha — pastel mauve accent on a warm dark base. |
+| **macintosh** | Macintosh 1984 light — warm phosphor paper, 1-bit black chrome, Apple 16-color status. |
+| **macintosh-dark** | Same vintage palette inverted: black CRT, warm white type. |
+
+```toml
+[theme]
+name = "terminal"
 ```
-cargo install --path . --force
-strip ~/.cargo/bin/zapusk
+
+Add more without recompiling: drop a TOML file in `~/.config/zapusk/themes/`. Same `id` as a builtin replaces it. An example (Tokyo Night) is in [`themes.example/`](themes.example/).
+
+```toml
+# ~/.config/zapusk/themes/tokyonight.toml
+id = "tokyonight"
+bg = "#1a1b26"
+text = "#c0caf5"
+accent = "#bb9af7"
+# … see themes.example/tokyonight.toml
 ```
+
+```toml
+[theme]
+name = "tokyonight"
+accent = "#7aa2f7"   # optional override
+```
+
+Color values are `#rrggbb`, named ANSI colors, or `reset` (terminal default). Config hot-reload applies theme changes.
 
 ---
 
@@ -600,7 +635,8 @@ language = "de"    # en | de | fr | it | sr | ru
 ```
 
 If `language` is unset, zapusk follows `LANG` / `LC_MESSAGES` (`de_*`, `fr_*`, `it_*`, `sr_*`, `ru_*`).
-In the TUI, press `l` to cycle languages; the choice is written back to `config.toml`.
+In the TUI, press `l` to open the language list, then `j`/`k` and Enter to choose.
+The choice is written back to `config.toml`. Press `t` for the same flow with color themes.
 
 To preview a translation without rebuilding, copy a file to
 `~/.config/zapusk/locales/de.toml` — it overlays the shipped file (same keys).

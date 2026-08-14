@@ -5,6 +5,35 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17]
+
+### Added
+
+- **Color themes** as TOML files. `[theme] name = "groknight"` (default) or
+  `"terminal"` (follow the terminal's own palette). Drop a file in
+  `~/.config/zapusk/themes/<id>.toml` to add more — same overlay model as
+  framework recipes. Slot overrides on `[theme]` still work. `zapusk doctor`
+  lists loaded themes. Example: [`themes.example/tokyonight.toml`](themes.example/tokyonight.toml).
+  Press `t` in the TUI to pick a theme from a list (same flow as `l` for
+  language). Shipped palettes also include **Nightfox**, **Catppuccin**
+  (Mocha), and **Macintosh 1984** light/dark (vintage phosphor + Apple
+  16-color status, inverted selection).
+
+### Changed
+
+- Default TUI chrome matches Grok Build: **GrokNight** palette on a padded
+  `#141414` canvas, faint square frames, `›` selection, a quiet header
+  (`zapusk  |  3 projects  |  …`), a boxed `>` prompt (status or selected
+  project, language + version on the right), and a footer of
+  `key:label  |  key:label` that follows the open overlay. Unmanaged
+  processes stay a header count plus the `u` popup.
+
+## [0.1.16]
+
+### Changed
+
+- `l` opens a language picker panel (list + j/k + Enter) instead of cycling blindly.
+
 ## [0.1.15]
 
 ### Added
