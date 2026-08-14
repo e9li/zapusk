@@ -1,0 +1,33 @@
+# Express / generic Node — copy to ~/.config/zapusk/frameworks/express.toml
+#
+#   mkdir -p ~/.config/zapusk/frameworks
+#   cp frameworks.example/express.toml ~/.config/zapusk/frameworks/
+#
+# Then in config.toml:
+#   type = "express"
+#
+# The default start is `npm run dev` (PORT is exported by zapusk).
+# Override per project for yarn / pnpm / a different script:
+#   command = "pnpm"
+#   args = ["dev", "--port", "5173"]
+
+id = "express"
+label = "express"
+
+[start]
+command = "npm"
+args = ["run", "dev"]
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "proxy"
+
+[doctor]
+binaries = ["node", "npm"]
+marker_files = ["package.json"]
+
+[discovery]
+command_contains = ["node", "nodemon"]

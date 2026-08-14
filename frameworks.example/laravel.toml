@@ -1,0 +1,36 @@
+# Laravel — copy to ~/.config/zapusk/frameworks/laravel.toml
+#
+#   mkdir -p ~/.config/zapusk/frameworks
+#   cp frameworks.example/laravel.toml ~/.config/zapusk/frameworks/
+#
+# Then in config.toml:
+#   type = "laravel"
+#   php_version = "8.3"   # optional; selects Homebrew php@8.3 on macOS
+#
+# For a full Docker stack, use type = "compose" instead.
+
+id = "laravel"
+label = "laravel"
+
+[start]
+command = "{php}"
+args = ["artisan", "serve", "--host=127.0.0.1", "--port={port}"]
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "static_plus_proxy"
+root = "{root}"
+block_paths = ["/.env", "/.env.*", "/storage/*", "/bootstrap/cache/*"]
+
+[hooks]
+resolve_php_binary = true
+
+[doctor]
+binaries = ["php"]
+marker_files = ["artisan", "composer.json"]
+
+[discovery]
+command_contains = ["artisan"]

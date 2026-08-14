@@ -1,0 +1,31 @@
+# Ruby on Rails — copy to ~/.config/zapusk/frameworks/rails.toml
+#
+#   mkdir -p ~/.config/zapusk/frameworks
+#   cp frameworks.example/rails.toml ~/.config/zapusk/frameworks/
+#
+# Then in config.toml:
+#   type = "rails"
+#
+# Override the start command per project if you use bin/dev (Foreman/Overmind):
+#   command = "bin/dev"
+
+id = "rails"
+label = "rails"
+
+[start]
+command = "bin/rails"
+args = ["server", "-p", "{port}", "-b", "127.0.0.1"]
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "proxy"
+
+[doctor]
+binaries = ["ruby"]
+marker_files = ["Gemfile", "config.ru"]
+
+[discovery]
+command_contains = ["puma", "rails"]
