@@ -4,7 +4,8 @@ use std::path::Path;
 use tokio::process::Command;
 
 use crate::cli::spinner::Spinner;
-use crate::core::config::{Config, ProjectConfig, ProjectType};
+use crate::core::config::{Config, ProjectConfig};
+use crate::core::framework::{FrameworkRegistry, FrameworkSource};
 use crate::platform;
 
 pub struct CheckResult {
@@ -46,6 +47,7 @@ impl CheckResult {
 
 pub async fn run() -> Result<()> {
     let config = Config::load().ok();
+    let frameworks = FrameworkRegistry::load();
     let tld = config.as_ref().map(|c| c.tld.as_str()).unwrap_or("test");
     let mut issues = 0;
     let mut warnings = 0;
@@ -78,9 +80,24 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // PHP checks (only if config has Kirby projects)
+    // Framework recipes
+    {
+        println!("\nFrameworks");
+        for r in check_frameworks(&frameworks) {
+            print_check(&r);
+            if !r.ok {
+                if r.is_warning {
+                    warnings += 1;
+                } else {
+                    issues += 1;
+                }
+            }
+        }
+    }
+
+    // PHP checks (only if a recipe asks for PHP)
     if let Some(ref cfg) = config {
-        let php_versions = collect_php_versions(cfg);
+        let php_versions = collect_php_versions(cfg, &frameworks);
         if !php_versions.is_empty() {
             let sp = Spinner::start("Checking PHP installations...");
             let mut results = vec![];
@@ -100,7 +117,7 @@ pub async fn run() -> Result<()> {
 
     // Docker checks (only if config has compose projects)
     if let Some(ref cfg) = config {
-        if has_compose_projects(cfg) {
+        if has_compose_projects(cfg, &frameworks) {
             let sp = Spinner::start("Checking Docker...");
             let results = check_docker().await;
             sp.clear().await;
@@ -124,7 +141,7 @@ pub async fn run() -> Result<()> {
         let mut results = vec![];
         results.extend(check_project_config_conflicts(cfg));
         for project in &cfg.projects {
-            results.push(check_project(project).await);
+            results.push(check_project(project, &frameworks).await);
         }
         sp.clear().await;
         println!("\nProjects");
@@ -170,6 +187,7 @@ pub async fn run() -> Result<()> {
 /// Run all doctor checks silently and return whether everything passed.
 pub async fn run_quiet() -> Result<bool> {
     let config = Config::load().ok();
+    let frameworks = FrameworkRegistry::load();
     let tld = config.as_ref().map(|c| c.tld.as_str()).unwrap_or("test");
     let mut issues = 0;
 
@@ -179,15 +197,21 @@ pub async fn run_quiet() -> Result<bool> {
         }
     }
 
+    for r in check_frameworks(&frameworks) {
+        if !r.ok && !r.is_warning {
+            issues += 1;
+        }
+    }
+
     if let Some(ref cfg) = config {
-        for v in &collect_php_versions(cfg) {
+        for v in &collect_php_versions(cfg, &frameworks) {
             for r in check_php(v).await {
                 if !r.ok {
                     issues += 1;
                 }
             }
         }
-        if has_compose_projects(cfg) {
+        if has_compose_projects(cfg, &frameworks) {
             for r in check_docker().await {
                 if !r.ok && !r.is_warning {
                     issues += 1;
@@ -195,7 +219,7 @@ pub async fn run_quiet() -> Result<bool> {
             }
         }
         for project in &cfg.projects {
-            if !check_project(project).await.ok {
+            if !check_project(project, &frameworks).await.ok {
                 issues += 1;
             }
         }
@@ -429,11 +453,16 @@ pub async fn check_dns_resolution(tld: &str) -> CheckResult {
 
 // --- PHP checks ---
 
-pub fn collect_php_versions(config: &Config) -> Vec<String> {
+pub fn collect_php_versions(config: &Config, frameworks: &FrameworkRegistry) -> Vec<String> {
     let mut versions: Vec<String> = config
         .projects
         .iter()
-        .filter(|p| p.project_type == ProjectType::Kirby)
+        .filter(|p| {
+            frameworks
+                .get(&p.project_type)
+                .map(|s| s.hooks.require_php)
+                .unwrap_or(false)
+        })
         .filter_map(|p| p.php_version.clone())
         .collect();
     versions.sort();
@@ -476,11 +505,35 @@ pub async fn check_php(version: &str) -> Vec<CheckResult> {
 
 // --- Docker checks (compose projects only) ---
 
-pub fn has_compose_projects(config: &Config) -> bool {
+pub fn has_compose_projects(config: &Config, frameworks: &FrameworkRegistry) -> bool {
     config
         .projects
         .iter()
-        .any(|p| p.project_type == ProjectType::Compose)
+        .any(|p| frameworks.is_compose(&p.project_type))
+}
+
+fn check_frameworks(frameworks: &FrameworkRegistry) -> Vec<CheckResult> {
+    let mut results = vec![];
+    for id in frameworks.ids() {
+        let source = frameworks
+            .source(&id)
+            .map(FrameworkSource::label)
+            .unwrap_or_else(|| "unknown".into());
+        results.push(CheckResult::pass(format!("{:<14} {}", id, source)));
+    }
+    for warning in frameworks.warnings() {
+        results.push(CheckResult::warn(
+            warning.clone(),
+            "fix or remove the framework TOML file",
+        ));
+    }
+    if results.is_empty() {
+        results.push(CheckResult::fail(
+            "no framework recipes loaded",
+            "this is a bug — builtins should always be present",
+        ));
+    }
+    results
 }
 
 pub async fn check_docker() -> Vec<CheckResult> {
@@ -561,7 +614,7 @@ async fn check_compose_cli() -> CheckResult {
 
 // --- Per-project checks ---
 
-pub async fn check_project(project: &ProjectConfig) -> CheckResult {
+pub async fn check_project(project: &ProjectConfig, frameworks: &FrameworkRegistry) -> CheckResult {
     let path = Path::new(&project.path);
     if !path.exists() {
         return CheckResult::fail(
@@ -570,53 +623,54 @@ pub async fn check_project(project: &ProjectConfig) -> CheckResult {
         );
     }
 
-    // Check for project-type-specific files
-    let (expected_file, binary) = match project.project_type {
-        ProjectType::Phoenix => ("mix.exs", "mix"),
-        ProjectType::Symfony => ("composer.json", "symfony"),
-        ProjectType::Kirby => ("composer.json", "php"),
-        ProjectType::Axum => ("Cargo.toml", "cargo"),
-        ProjectType::Compose => ("", "docker"),
-    };
-
-    if project.project_type == ProjectType::Compose {
-        if let Err(e) = project.resolve_compose_file() {
-            return CheckResult::fail(
-                format!(
-                    "{:<14} {} ({})",
-                    project.name,
-                    project.path,
-                    project.project_type.label(),
-                ),
-                e.to_string(),
-            );
-        }
-    } else if !path.join(expected_file).exists() {
+    let Some(spec) = frameworks.get(&project.project_type) else {
         return CheckResult::fail(
             format!(
-                "{:<14} {} ({}) — missing {}",
+                "{:<14} {} ({})",
                 project.name,
                 project.path,
                 project.project_type.label(),
-                expected_file,
             ),
-            format!("expected {} in project directory", expected_file),
+            format!(
+                "unknown framework '{}'. Add ~/.config/zapusk/frameworks/{}.toml",
+                project.project_type, project.project_type
+            ),
         );
+    };
+
+    if spec.is_compose() {
+        if let Err(e) = project.resolve_compose_file() {
+            return CheckResult::fail(
+                format!("{:<14} {} ({})", project.name, project.path, spec.label(),),
+                e.to_string(),
+            );
+        }
+    } else {
+        for marker in &spec.doctor.marker_files {
+            if !path.join(marker).exists() {
+                return CheckResult::fail(
+                    format!(
+                        "{:<14} {} ({}) — missing {}",
+                        project.name,
+                        project.path,
+                        spec.label(),
+                        marker,
+                    ),
+                    format!("expected {} in project directory", marker),
+                );
+            }
+        }
     }
 
-    // Check binary in PATH
-    match Command::new("which").arg(binary).output().await {
-        Ok(output) if output.status.success() => {}
-        _ => {
-            return CheckResult::fail(
-                format!(
-                    "{:<14} {} ({})",
-                    project.name,
-                    project.path,
-                    project.project_type.label(),
-                ),
-                format!("`{}` not found in PATH", binary),
-            );
+    for binary in &spec.doctor.binaries {
+        match Command::new("which").arg(binary).output().await {
+            Ok(output) if output.status.success() => {}
+            _ => {
+                return CheckResult::fail(
+                    format!("{:<14} {} ({})", project.name, project.path, spec.label(),),
+                    format!("`{}` not found in PATH", binary),
+                );
+            }
         }
     }
 
@@ -624,7 +678,7 @@ pub async fn check_project(project: &ProjectConfig) -> CheckResult {
         "{:<14} {} ({})",
         project.name,
         project.path,
-        project.project_type.label(),
+        spec.label(),
     ))
 }
 
@@ -637,9 +691,27 @@ async fn check_conflicts(tld: &str) -> Vec<CheckResult> {
 
     // Tools that manage local domains or web servers
     let tools: &[(&str, String)] = &[
-        ("ddev", format!("ddev manages its own DNS and router — .{} domains may conflict", tld)),
-        ("herd", format!("Laravel Herd manages its own DNS and nginx — port 80/443 and .{} domains may conflict", tld)),
-        ("valet", format!("Laravel Valet manages its own dnsmasq and nginx — port 80/443 and .{} domains may conflict", tld)),
+        (
+            "ddev",
+            format!(
+                "ddev manages its own DNS and router — .{} domains may conflict",
+                tld
+            ),
+        ),
+        (
+            "herd",
+            format!(
+                "Laravel Herd manages its own DNS and nginx — port 80/443 and .{} domains may conflict",
+                tld
+            ),
+        ),
+        (
+            "valet",
+            format!(
+                "Laravel Valet manages its own dnsmasq and nginx — port 80/443 and .{} domains may conflict",
+                tld
+            ),
+        ),
     ];
 
     for (binary, message) in tools {

@@ -1,0 +1,24 @@
+id = "phoenix"
+label = "phoenix"
+
+[start]
+command = "mix"
+args = ["phx.server"]
+
+[env]
+PHX_HOST = "{domain}"
+PHX_SERVER = "true"
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "proxy"
+
+[doctor]
+binaries = ["mix"]
+marker_files = ["mix.exs"]
+
+[discovery]
+command_contains = ["beam.smp", "elixir", "mix"]

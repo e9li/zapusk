@@ -1,6 +1,6 @@
 [package]
 name = "zapusk"
-version = "0.1.10"
+version = "0.1.15"
 edition = "2024"
 
 [[bin]]
@@ -21,3 +21,4 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 shell-words = "1"
 serde_json = "1"
+clap_complete = "4"

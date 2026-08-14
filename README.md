@@ -24,6 +24,8 @@ A lightweight terminal UI for managing local development projects. Built with Ru
 
 ### Supported project types
 
+Built-in recipes (shipped in the binary):
+
 | Type | How it runs |
 |------|-------------|
 | **Phoenix** | `mix phx.server` |
@@ -32,7 +34,15 @@ A lightweight terminal UI for managing local development projects. Built with Ru
 | **Axum** | `cargo run` |
 | **Compose** | `docker compose up` (foreground) — the whole stack (app, db, redis, …) runs in containers |
 
-The design is intentionally stack-agnostic — anything that binds to a port can be added as a project type. Caddy proxies it; `zapusk` manages the process.
+Add more types without recompiling: drop a TOML recipe in `~/.config/zapusk/frameworks/`. Ready-made examples for **Rails**, **Laravel**, and **Express** are in [`frameworks.example/`](frameworks.example/).
+
+```bash
+mkdir -p ~/.config/zapusk/frameworks
+cp frameworks.example/rails.toml ~/.config/zapusk/frameworks/
+# then in config.toml:  type = "rails"
+```
+
+The design is intentionally stack-agnostic — anything that binds to a port can be a recipe. Caddy proxies it; `zapusk` manages the process.
 
 ---
 
@@ -152,12 +162,14 @@ Notes:
 ```
 ~/.config/zapusk/
 ├── config.toml       ← project registry + caddy settings
+├── frameworks/       ← user recipes (rails.toml, express.toml, …); override builtins by id
 ├── Caddyfile         ← auto-generated, do not edit manually
 ├── logs/             ← stdout/stderr log files per project (<name>.out, <name>.err)
 └── pids/             ← pidfiles for process re-adoption across sessions (<name>.pid)
 ```
 
 ```
+locales/              # UI translations: en, de, fr, it, sr, ru
 src/
 ├── main.rs           # Entry point, terminal setup, render loop
 ├── platform.rs       # All OS-specific logic (macOS vs Linux)
@@ -169,15 +181,19 @@ src/
 │   ├── project.rs    # Project model (config + runtime state + log ring buffer)
 │   ├── manager.rs    # Child process spawning, log file tailing, pidfile tracking
 │   ├── caddy.rs      # Caddyfile generation and `caddy reload`
-│   ├── config.rs     # TOML config deserialization + ProjectType
+│   ├── config.rs     # TOML config deserialization + FrameworkId
+│   ├── framework.rs  # Recipe registry (builtins + ~/.config/zapusk/frameworks)
 │   ├── docker.rs     # docker compose CLI detection + up/ps/logs/stop commands
-│   └── discovery.rs  # Listening-port discovery + stack heuristics
+│   └── discovery.rs  # Listening-port discovery + recipe heuristics
+├── frameworks/       # Shipped builtin recipes (phoenix, symfony, kirby, axum, compose)
+├── i18n.rs           # Language switch + TOML catalog loader
 └── cli/
     ├── doctor.rs     # `zapusk doctor` — dependency checks
     ├── init.rs       # `zapusk init` — interactive first-run setup
     ├── add.rs        # `zapusk add` — add project interactively
     ├── destroy.rs    # `zapusk destroy` — remove all zapusk configuration
-    └── discover.rs   # `zapusk discover` — list unmanaged listening apps
+    ├── discover.rs   # `zapusk discover` — list unmanaged listening apps
+    └── completions.rs # `zapusk completions` — clap shell scripts
 ```
 
 ---
@@ -194,6 +210,7 @@ zapusk add          # add a project to config interactively
 zapusk destroy      # remove all zapusk configuration
 zapusk discover     # discover listening services (managed + unmanaged)
 zapusk discover --import 4000  # import discovered service by port/pid
+zapusk completions zsh   # print a completion script (also bash/fish/elvish/powershell)
 ```
 
 ---
@@ -241,8 +258,9 @@ Should be runnable at any time, not just on first install.
 ### Checks performed
 
 - **System:** caddy binary, dnsmasq installed/running/configured, DNS resolution
-- **PHP:** per-version binary present (only if Kirby projects exist)
+- **PHP:** per-version binary present (only if a recipe sets `require_php` / `resolve_php_binary`)
 - **Docker:** daemon reachable, compose v2 plugin present (only if compose projects exist)
+- **Frameworks:** loaded recipes (builtin vs user) and parse errors
 - **Projects:** path exists, expected files present, required binaries in PATH
 - **Caddy:** Caddyfile exists, `caddy validate` passes
 
@@ -347,6 +365,7 @@ Setup complete. Run `zapusk` to open the TUI.
 | `j/k` or `↑/↓` | Navigate project list |
 | `PgUp/PgDn` | Scroll logs |
 | `G` or `End` | Jump to latest logs |
+| `l` | Cycle UI language (English → Deutsch → Français → Italiano → Srpski → Русский) |
 | `q` | Quit (keeps running projects alive) |
 | `Q` | Force quit (stops projects, then tries to stop Caddy/dnsmasq) |
 
@@ -400,6 +419,76 @@ lookup. On the next `zapusk` start, pidfiles allow previously-running projects t
 re-adopted automatically without having been stopped.
 
 ---
+
+## Framework recipes
+
+A recipe is a TOML file with an `id` (used as `type` in `config.toml`). Built-ins live inside the binary; user files in `~/.config/zapusk/frameworks/*.toml` are merged on top (same `id` overrides the builtin).
+
+Minimal example (`~/.config/zapusk/frameworks/rails.toml`):
+
+```toml
+id = "rails"
+
+[start]
+command = "bin/rails"
+args = ["server", "-p", "{port}", "-b", "127.0.0.1"]
+
+[doctor]
+binaries = ["ruby"]
+marker_files = ["Gemfile", "config.ru"]
+```
+
+### Placeholders
+
+Substituted in `start.command`, `start.args`, `env` values, and Caddy `root` / `block_paths`:
+
+| Token | Source |
+|-------|--------|
+| `{port}` | project `port` |
+| `{path}` | project `path` |
+| `{domain}` | project `domain` |
+| `{name}` | project `name` |
+| `{php_version}` | project `php_version` (empty if unset) |
+| `{public_dir}` | project `public_dir`, default `public` |
+| `{root}` | `{path}/{public_dir}`, or `{path}` when `public_dir = "/"` |
+| `{php}` | resolved PHP binary when `hooks.resolve_php_binary` is set, else `php` |
+
+Per-project `command` / `args` still override the recipe start command. Per-project `env` is merged on top of the recipe env. `PORT` is always exported.
+
+### Optional sections
+
+```toml
+[env]
+PHX_HOST = "{domain}"
+
+[lifecycle]
+kind = "native"          # native | compose
+ready_attempts = 8       # domain-verify retries (compose builtin uses 40)
+
+[caddy]
+profile = "proxy"        # proxy | static_plus_proxy
+root = "{root}"          # static_plus_proxy only
+block_paths = ["/.*"]    # static_plus_proxy only
+
+[hooks]
+sync_php_version = false     # write/delete .php-version from php_version
+resolve_php_binary = false   # resolve {php} via Homebrew php@X.Y
+require_php = false          # doctor checks php@version + FPM
+
+[discovery]
+command_contains = ["puma"]
+cwd_contains = ["config/application.rb"]
+```
+
+Unknown hook names and unknown Caddy profiles are rejected when the file is loaded (`zapusk doctor` lists the error). Recipes cannot embed raw Caddy snippets or shell scripts.
+
+Copy the samples:
+
+```bash
+cp frameworks.example/rails.toml ~/.config/zapusk/frameworks/
+cp frameworks.example/laravel.toml ~/.config/zapusk/frameworks/
+cp frameworks.example/express.toml ~/.config/zapusk/frameworks/
+```
 
 ## Config reference
 
@@ -499,11 +588,61 @@ strip ~/.cargo/bin/zapusk
 
 ---
 
+## Languages
+
+The TUI is available in **English**, **German**, **French**, **Italian**, **Serbian** (Latin), and **Russian**.
+Strings live in [`locales/`](locales/) (`en.toml`, `de.toml`, `fr.toml`, `it.toml`, `sr.toml`, `ru.toml`) so a new
+language is another TOML file, not a Rust change.
+
+```toml
+# ~/.config/zapusk/config.toml
+language = "de"    # en | de | fr | it | sr | ru
+```
+
+If `language` is unset, zapusk follows `LANG` / `LC_MESSAGES` (`de_*`, `fr_*`, `it_*`, `sr_*`, `ru_*`).
+In the TUI, press `l` to cycle languages; the choice is written back to `config.toml`.
+
+To preview a translation without rebuilding, copy a file to
+`~/.config/zapusk/locales/de.toml` — it overlays the shipped file (same keys).
+Keep `{name}` / `{port}` / … placeholders unchanged.
+
+CLI subcommands (`doctor`, `init`, …) stay in English.
+
+## Config hot-reload
+
+While the TUI is open, zapusk polls `~/.config/zapusk/config.toml` about twice a
+second. Saving the file in an editor updates the project list:
+
+- New projects appear as **stopped** (`autostart` is launch-only, not applied on reload)
+- Removed projects leave the list. If they were running, the process is **not**
+  killed (same contract as `q`); zapusk just stops tracking it
+- Field edits apply immediately for the next start. A running project whose
+  command, port, or path changed is **not** restarted — the status bar asks you to
+- Domain / TLS / alias changes regenerate the Caddyfile
+- Invalid TOML keeps the current list and shows the parse error
+- Reloads wait if the add/edit form or a confirm dialog is open
+- Adding a **framework recipe** still needs a TUI restart (the recipe registry
+  is loaded at startup)
+
+## Shell completions
+
+```bash
+# zsh
+mkdir -p ~/.zfunc
+zapusk completions zsh > ~/.zfunc/_zapusk
+# in ~/.zshrc:  fpath=(~/.zfunc $fpath) && autoload -Uz compinit && compinit
+
+# bash
+mkdir -p ~/.local/share/bash-completion/completions
+zapusk completions bash > ~/.local/share/bash-completion/completions/zapusk
+
+# fish
+zapusk completions fish > ~/.config/fish/completions/zapusk.fish
+```
+
+`zapusk completions` also accepts `elvish` and `powershell`.
+
 ## TODO / Ideas
 
-### Features
-- [ ] Watch config file for changes and hot-reload project list
-
 ### Distribution
-- [ ] Shell completions (bash, zsh, fish) via `clap`
 - [ ] Homebrew formula

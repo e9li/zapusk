@@ -9,10 +9,11 @@ use ratatui::{
 
 use std::sync::OnceLock;
 
-use super::app::{ActivePane, AddField, AddForm, App, EditForm, ServiceState};
+use super::app::{ActivePane, AddField, AddForm, App, ConfirmAction, EditForm, ServiceState};
 use crate::core::config::ThemeConfig;
 use crate::core::discovery::ServiceInfo;
 use crate::core::project::{ProcessOrigin, Project, ProjectStatus};
+use crate::i18n::Msg;
 
 // ── Theme ──────────────────────────────────────────────────────────────────
 
@@ -238,15 +239,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Bottom hints — no border
     let hints: &[(&str, &str)] = &[
-        ("s ", " start"),
-        ("x ", " stop"),
-        ("r ", " restart"),
-        ("a ", " add"),
-        ("e ", " edit"),
-        ("D ", " del"),
-        ("u ", " unmanaged"),
-        ("? ", " help"),
-        ("q ", " quit"),
+        ("s ", app.tr(Msg::HintStart)),
+        ("x ", app.tr(Msg::HintStop)),
+        ("r ", app.tr(Msg::HintRestart)),
+        ("a ", app.tr(Msg::HintAdd)),
+        ("e ", app.tr(Msg::HintEdit)),
+        ("D ", app.tr(Msg::HintDel)),
+        ("u ", app.tr(Msg::HintUnmanaged)),
+        ("l ", app.tr(Msg::HintLang)),
+        ("? ", app.tr(Msg::HintHelp)),
+        ("q ", app.tr(Msg::HintQuit)),
     ];
     let mut hint_spans: Vec<Span> = vec![Span::raw(" ")];
     for (key, label) in hints {
@@ -295,11 +297,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Overlays
     if app.show_detail_popup {
         if let Some(project) = app.projects.get(app.selected) {
-            draw_detail_popup(frame, project);
+            draw_detail_popup(frame, app, project);
         }
     }
     if app.show_help {
-        draw_help(frame);
+        draw_help(frame, app);
     }
     if let Some(form) = &app.add_form {
         draw_add_form(frame, app, form);
@@ -308,13 +310,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_edit_form(frame, app, form);
     }
     if let Some(dialog) = &app.confirm_dialog {
-        draw_confirm_dialog(frame, &dialog.message);
+        draw_confirm_dialog(frame, app, dialog.action.clone());
     }
     if app.show_unmanaged_popup {
         draw_unmanaged_popup(frame, app);
         if app.show_unmanaged_detail {
             if let Some(service) = app.selected_unmanaged() {
-                draw_unmanaged_detail(frame, service);
+                draw_unmanaged_detail(frame, app, service);
             }
         }
     }
@@ -323,7 +325,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 // ── Project list ───────────────────────────────────────────────────────────
 
 fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
-    let projects_title = format!("Projects ({:})", app.projects.len());
+    let projects_title = format!("{} ({})", app.tr(Msg::Projects), app.projects.len());
     let focused = app.active_pane == ActivePane::ProjectList;
     let block = make_block(&projects_title, focused);
 
@@ -331,16 +333,16 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
         let empty = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  No projects configured",
+                format!("  {}", app.tr(Msg::NoProjects)),
                 Style::default().fg(t().text_dim),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "  Press 'a' to add a project",
+                format!("  {}", app.tr(Msg::PressAToAdd)),
                 Style::default().fg(t().text_dim),
             )),
             Line::from(Span::styled(
-                "  or run: zapusk add",
+                format!("  {}", app.tr(Msg::OrRunZapuskAdd)),
                 Style::default().fg(t().text_dim),
             )),
         ])
@@ -450,11 +452,11 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
 // ── Project details (inline pane) ──────────────────────────────────────────
 
 fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
-    let block = make_block("Details", false);
+    let block = make_block(app.tr(Msg::Details), false);
 
     let Some(project) = app.projects.get(app.selected) else {
         let empty = Paragraph::new(Span::styled(
-            " No project selected",
+            format!(" {}", app.tr(Msg::NoProjectSelected)),
             Style::default().fg(t().text_dim),
         ))
         .block(block);
@@ -465,17 +467,25 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
     let cfg = &project.config;
     let mut lines: Vec<Line> = vec![];
 
-    lines.push(detail_row("domain", &cfg.domain, t().text));
+    lines.push(detail_row(app.tr(Msg::LabelDomain), &cfg.domain, t().text));
     for alias in &cfg.aliases {
-        lines.push(detail_row("alias", alias, t().text));
+        lines.push(detail_row(app.tr(Msg::LabelAlias), alias, t().text));
     }
-    lines.push(detail_row("port", &cfg.port.to_string(), t().text));
+    lines.push(detail_row(
+        app.tr(Msg::LabelPort),
+        &cfg.port.to_string(),
+        t().text,
+    ));
 
-    let tls_label = if cfg.tls { "tls:on" } else { "tls:off" };
+    let tls_label = if cfg.tls {
+        app.tr(Msg::TlsOn)
+    } else {
+        app.tr(Msg::TlsOff)
+    };
     let tls_color = if cfg.tls { t().ok } else { t().text_dim };
     lines.push(Line::from(vec![
         Span::styled(
-            format!(" {:<10}", "type"),
+            format!(" {:<10}", app.tr(Msg::LabelType)),
             Style::default().fg(t().text_dim),
         ),
         Span::styled(
@@ -486,19 +496,31 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(tls_label.to_string(), Style::default().fg(tls_color)),
     ]));
 
-    lines.push(detail_row("path", &truncate(&cfg.path, 28), t().text_dim));
+    lines.push(detail_row(
+        app.tr(Msg::LabelPath),
+        &truncate(&cfg.path, 28),
+        t().text_dim,
+    ));
 
     if let Some(ref cmd) = cfg.command {
-        lines.push(detail_row("command", &truncate(cmd, 28), t().text_dim));
+        lines.push(detail_row(
+            app.tr(Msg::LabelCommand),
+            &truncate(cmd, 28),
+            t().text_dim,
+        ));
     }
     if let Some(ref host) = cfg.upstream_host {
-        lines.push(detail_row("upstream", host, t().text_dim));
+        lines.push(detail_row(app.tr(Msg::LabelUpstream), host, t().text_dim));
     }
     if let Some(ref php) = cfg.php_version {
-        lines.push(detail_row("php", php, t().text_dim));
+        lines.push(detail_row(app.tr(Msg::LabelPhp), php, t().text_dim));
     }
     if cfg.autostart {
-        lines.push(detail_row("autostart", "yes", t().ok));
+        lines.push(detail_row(
+            app.tr(Msg::LabelAutostart),
+            app.tr(Msg::Yes),
+            t().ok,
+        ));
     }
 
     let status_color = match &project.status {
@@ -509,18 +531,18 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
     };
     let mut status_line = vec![
         Span::styled(
-            format!(" {:<10}", "status"),
+            format!(" {:<10}", app.tr(Msg::LabelStatus)),
             Style::default().fg(t().text_dim),
         ),
         Span::styled(
-            project.status.label().to_string(),
+            app.status_label(&project.status).to_string(),
             Style::default().fg(status_color),
         ),
     ];
     if let Some(ref origin) = project.origin {
         let (tag, label, color) = match origin {
-            ProcessOrigin::Managed => ("[M]", "managed", t().ok),
-            ProcessOrigin::Adopted => ("[A]", "adopted", t().warn),
+            ProcessOrigin::Managed => ("[M]", app.tr(Msg::OriginManaged), t().ok),
+            ProcessOrigin::Adopted => ("[A]", app.tr(Msg::OriginAdopted), t().warn),
         };
         status_line.push(Span::styled(
             format!("  {} {}", tag, label),
@@ -541,7 +563,7 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
         let mins = total_secs / 60;
         let secs = total_secs % 60;
         lines.push(detail_row(
-            "uptime",
+            app.tr(Msg::LabelUptime),
             &format!("{}m {}s", mins, secs),
             t().text_dim,
         ));
@@ -561,8 +583,8 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     let title = app
         .projects
         .get(app.selected)
-        .map(|p| format!("Logs: {}", p.config.name))
-        .unwrap_or_else(|| "Logs".into());
+        .map(|p| format!("{}: {}", app.tr(Msg::Logs), p.config.name))
+        .unwrap_or_else(|| app.tr(Msg::Logs).into());
 
     let block = make_block(&title, focused);
     let logs = app.selected_logs();
@@ -649,7 +671,13 @@ fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
     let unmanaged_count = app.unmanaged_services.len();
     if unmanaged_count > 0 {
         spans.push(Span::styled(
-            format!(" {} unmanaged ", unmanaged_count),
+            format!(
+                " {} ",
+                app.trf(
+                    Msg::UnmanagedCount,
+                    &[("count", &unmanaged_count.to_string())]
+                )
+            ),
             Style::default().fg(Color::Black).bg(t().warn),
         ));
     }
@@ -661,13 +689,13 @@ fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
 // ── Unmanaged compact ──────────────────────────────────────────────────────
 
 fn draw_unmanaged_compact(frame: &mut Frame, app: &App, area: Rect) {
-    let block = make_block("Unmanaged", false);
+    let block = make_block(app.tr(Msg::Unmanaged), false);
 
     if app.unmanaged_all_services.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  none (press u)",
+                format!("  {}", app.tr(Msg::NonePressU)),
                 Style::default().fg(t().text_dim),
             )),
         ])
@@ -700,23 +728,23 @@ fn draw_unmanaged_compact(frame: &mut Frame, app: &App, area: Rect) {
 // ── Services strip (horizontal, below logs) ────────────────────────────────
 
 fn draw_service_strip(frame: &mut Frame, app: &App, area: Rect) {
-    let block = make_block("Services", false);
+    let block = make_block(app.tr(Msg::Services), false);
 
     let mut spans = vec![Span::raw("  ")];
-    spans.extend(service_indicator("caddy", app.caddy_state));
+    spans.extend(service_indicator("caddy", app.caddy_state, app));
     spans.push(Span::raw("      "));
-    spans.extend(service_indicator("dnsmasq", app.dnsmasq_state));
+    spans.extend(service_indicator("dnsmasq", app.dnsmasq_state, app));
     let line = Line::from(spans);
 
     let p = Paragraph::new(line).block(block);
     frame.render_widget(p, area);
 }
 
-fn service_indicator(name: &str, state: ServiceState) -> Vec<Span<'static>> {
+fn service_indicator(name: &str, state: ServiceState, app: &App) -> Vec<Span<'static>> {
     let (icon, color, label) = match state {
-        ServiceState::Running => ("\u{25cf}", t().ok, "running"),
-        ServiceState::Paused => ("\u{25d0}", t().warn, "paused"),
-        ServiceState::Stopped => ("\u{25cb}", t().text_dim, "stopped"),
+        ServiceState::Running => ("\u{25cf}", t().ok, app.tr(Msg::StatusRunning)),
+        ServiceState::Paused => ("\u{25d0}", t().warn, app.tr(Msg::StatusPaused)),
+        ServiceState::Stopped => ("\u{25cb}", t().text_dim, app.tr(Msg::StatusStopped)),
     };
     vec![
         Span::styled(icon.to_string(), Style::default().fg(color)),
@@ -727,7 +755,7 @@ fn service_indicator(name: &str, state: ServiceState) -> Vec<Span<'static>> {
 
 // ── Detail popup ───────────────────────────────────────────────────────────
 
-fn draw_detail_popup(frame: &mut Frame, project: &Project) {
+fn draw_detail_popup(frame: &mut Frame, app: &App, project: &Project) {
     let area = centered_rect(50, 50, frame.area());
     frame.render_widget(Clear, area);
 
@@ -740,47 +768,71 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
         })
         .unwrap_or_else(|| "-".into());
 
+    let origin = match project.origin.as_ref() {
+        Some(ProcessOrigin::Managed) => app.tr(Msg::OriginManaged),
+        Some(ProcessOrigin::Adopted) => app.tr(Msg::OriginAdopted),
+        None => "-",
+    };
     let mut text = vec![
-        Line::from(format!("  Name:    {}", project.config.name)),
-        Line::from(format!("  Domain:  {}", project.config.domain)),
+        Line::from(format!(
+            "  {}:    {}",
+            app.tr(Msg::LabelName),
+            project.config.name
+        )),
+        Line::from(format!(
+            "  {}:  {}",
+            app.tr(Msg::LabelDomain),
+            project.config.domain
+        )),
     ];
     for alias in &project.config.aliases {
-        text.push(Line::from(format!("  Alias:   {}", alias)));
+        text.push(Line::from(format!(
+            "  {}:   {}",
+            app.tr(Msg::LabelAlias),
+            alias
+        )));
     }
     text.extend(vec![
-        Line::from(format!("  Port:    {}", project.config.port)),
         Line::from(format!(
-            "  Type:    {}",
+            "  {}:    {}",
+            app.tr(Msg::LabelPort),
+            project.config.port
+        )),
+        Line::from(format!(
+            "  {}:    {}",
+            app.tr(Msg::LabelType),
             project.config.project_type.label()
         )),
-        Line::from(format!("  Path:    {}", project.config.path)),
-        Line::from(format!("  Status:  {}", project.status.label())),
         Line::from(format!(
-            "  Source:  {}",
-            match project.origin.as_ref() {
-                Some(ProcessOrigin::Managed) => "managed",
-                Some(ProcessOrigin::Adopted) => "adopted",
-                None => "-",
-            }
+            "  {}:    {}",
+            app.tr(Msg::LabelPath),
+            project.config.path
         )),
         Line::from(format!(
-            "  PID:     {}",
+            "  {}:  {}",
+            app.tr(Msg::LabelStatus),
+            app.status_label(&project.status)
+        )),
+        Line::from(format!("  {}:  {}", app.tr(Msg::LabelSource), origin)),
+        Line::from(format!(
+            "  {}:     {}",
+            app.tr(Msg::LabelPid),
             project.pid.map_or("-".into(), |p| p.to_string())
         )),
-        Line::from(format!("  Uptime:  {}", uptime)),
+        Line::from(format!("  {}:  {}", app.tr(Msg::LabelUptime), uptime)),
         Line::from(""),
         Line::from(Span::styled(
-            "  D/Del removes this project",
+            format!("  {}", app.tr(Msg::DetailRemoveHint)),
             Style::default().fg(t().text_dim),
         )),
         Line::from(Span::styled(
-            "  Press Esc or d to close",
+            format!("  {}", app.tr(Msg::DetailCloseHint)),
             Style::default().fg(t().text_dim),
         )),
     ]);
 
     let popup = Paragraph::new(text)
-        .block(make_popup_block("Project Details", t().accent))
+        .block(make_popup_block(app.tr(Msg::ProjectDetails), t().accent))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -788,7 +840,7 @@ fn draw_detail_popup(frame: &mut Frame, project: &Project) {
 
 // ── Help popup ─────────────────────────────────────────────────────────────
 
-fn draw_help(frame: &mut Frame) {
+fn draw_help(frame: &mut Frame, app: &App) {
     let area = centered_rect(55, 70, frame.area());
     frame.render_widget(Clear, area);
 
@@ -798,55 +850,55 @@ fn draw_help(frame: &mut Frame) {
 
     let entries: Vec<Line> = vec![
         Line::from(""),
-        Line::from(Span::styled("  Projects", section_style)),
-        help_line("  s", "Start selected project", key_style, desc_style),
-        help_line("  x", "Stop selected project", key_style, desc_style),
-        help_line("  r", "Restart selected project", key_style, desc_style),
-        help_line("  a", "Add a new project", key_style, desc_style),
-        help_line("  e", "Edit selected project", key_style, desc_style),
-        help_line(
-            "  D / Del",
-            "Remove selected project",
-            key_style,
-            desc_style,
-        ),
-        help_line("  d", "Show project details", key_style, desc_style),
-        help_line("  o", "Open in browser", key_style, desc_style),
-        help_line("  c", "Copy domain to clipboard", key_style, desc_style),
-        help_line(
-            "  [M]/[A]",
-            "Managed / Adopted process",
-            key_style,
-            desc_style,
-        ),
-        Line::from(""),
-        Line::from(Span::styled("  Navigation", section_style)),
-        help_line("  j/k", "Move up/down", key_style, desc_style),
-        help_line(
-            "  Tab",
-            "Switch pane (projects/logs)",
-            key_style,
-            desc_style,
-        ),
-        help_line("  PgUp/PgDn", "Scroll logs", key_style, desc_style),
-        help_line("  G", "Jump to latest log", key_style, desc_style),
-        Line::from(""),
-        Line::from(Span::styled("  Other", section_style)),
-        help_line("  /", "Search/filter logs", key_style, desc_style),
-        help_line("  R", "Reload Caddy config", key_style, desc_style),
-        help_line("  u", "Unmanaged services", key_style, desc_style),
-        help_line("  ?", "Toggle this help", key_style, desc_style),
-        help_line("  q", "Quit (keep running)", key_style, desc_style),
-        help_line("  Q", "Force quit (stop all)", key_style, desc_style),
+        Line::from(Span::styled(
+            format!("  {}", app.tr(Msg::HelpProjects)),
+            section_style,
+        )),
+        help_line("  s", app.tr(Msg::HelpStart), key_style, desc_style),
+        help_line("  x", app.tr(Msg::HelpStop), key_style, desc_style),
+        help_line("  r", app.tr(Msg::HelpRestart), key_style, desc_style),
+        help_line("  a", app.tr(Msg::HelpAdd), key_style, desc_style),
+        help_line("  e", app.tr(Msg::HelpEdit), key_style, desc_style),
+        help_line("  D / Del", app.tr(Msg::HelpRemove), key_style, desc_style),
+        help_line("  d", app.tr(Msg::HelpDetails), key_style, desc_style),
+        help_line("  o", app.tr(Msg::HelpOpen), key_style, desc_style),
+        help_line("  c", app.tr(Msg::HelpCopy), key_style, desc_style),
+        help_line("  [M]/[A]", app.tr(Msg::HelpBadges), key_style, desc_style),
         Line::from(""),
         Line::from(Span::styled(
-            "  Press Esc or ? to close",
+            format!("  {}", app.tr(Msg::HelpNavigation)),
+            section_style,
+        )),
+        help_line("  j/k", app.tr(Msg::HelpMove), key_style, desc_style),
+        help_line("  Tab", app.tr(Msg::HelpPane), key_style, desc_style),
+        help_line(
+            "  PgUp/PgDn",
+            app.tr(Msg::HelpScrollLogs),
+            key_style,
+            desc_style,
+        ),
+        help_line("  G", app.tr(Msg::HelpJumpLog), key_style, desc_style),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", app.tr(Msg::HelpOther)),
+            section_style,
+        )),
+        help_line("  /", app.tr(Msg::HelpSearch), key_style, desc_style),
+        help_line("  R", app.tr(Msg::HelpReloadCaddy), key_style, desc_style),
+        help_line("  u", app.tr(Msg::HelpUnmanaged), key_style, desc_style),
+        help_line("  l", app.tr(Msg::HelpLanguage), key_style, desc_style),
+        help_line("  ?", app.tr(Msg::HelpToggle), key_style, desc_style),
+        help_line("  q", app.tr(Msg::HelpQuitSoft), key_style, desc_style),
+        help_line("  Q", app.tr(Msg::HelpQuitHard), key_style, desc_style),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", app.tr(Msg::HelpClose)),
             Style::default().fg(t().text_dim),
         )),
     ];
 
     let popup = Paragraph::new(entries)
-        .block(make_popup_block("Keybindings", t().accent))
+        .block(make_popup_block(app.tr(Msg::Keybindings), t().accent))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -869,20 +921,28 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
     let tls_active = matches!(form.field, AddField::Tls);
 
     let text_fields: &[(&str, &str, bool)] = &[
-        ("Name", &form.name, matches!(form.field, AddField::Name)),
         (
-            "Domain",
+            app.tr(Msg::LabelName),
+            &form.name,
+            matches!(form.field, AddField::Name),
+        ),
+        (
+            app.tr(Msg::LabelDomain),
             &form.domain,
             matches!(form.field, AddField::Domain),
         ),
         (
-            "Aliases",
+            app.tr(Msg::LabelAliases),
             &form.aliases,
             matches!(form.field, AddField::Aliases),
         ),
-        ("Port", &form.port, matches!(form.field, AddField::Port)),
         (
-            "Upstream",
+            app.tr(Msg::LabelPort),
+            &form.port,
+            matches!(form.field, AddField::Port),
+        ),
+        (
+            app.tr(Msg::LabelUpstream),
             &form.upstream_host,
             matches!(form.field, AddField::UpstreamHost),
         ),
@@ -912,10 +972,10 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
         t().text_dim
     };
     let mut type_spans = vec![Span::styled(
-        format!("  {:<10}", "Type"),
+        format!("  {:<10}", app.tr(Msg::LabelType)),
         Style::default().fg(label_color),
     )];
-    let options = super::app::TYPE_OPTIONS;
+    let options = &form.type_ids;
     for (i, opt) in options.iter().enumerate() {
         if i == form.type_index {
             type_spans.push(Span::styled(
@@ -934,7 +994,7 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
     // TLS selector
     let tls_label_color = if tls_active { t().accent } else { t().text_dim };
     let mut tls_spans = vec![Span::styled(
-        format!("  {:<10}", "TLS"),
+        format!("  {:<10}", app.tr(Msg::LabelTls)),
         Style::default().fg(tls_label_color),
     )];
     for (is_on, label) in [(false, "off"), (true, "on")] {
@@ -963,7 +1023,7 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
     };
     lines.push(Line::from(vec![
         Span::styled(
-            format!("  {:<10}", "Directory"),
+            format!("  {:<10}", app.tr(Msg::LabelDirectory)),
             Style::default().fg(path_label_color),
         ),
         Span::styled(path_str, Style::default().fg(t().text)),
@@ -979,9 +1039,9 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
 
     lines.push(Line::from(""));
     let hint = if type_active || tls_active {
-        "  \u{2190}/\u{2192} select option  Enter: next  Esc: cancel"
+        app.tr(Msg::FormHintSelect)
     } else {
-        "  Enter: next field  Esc: cancel"
+        app.tr(Msg::FormHintText)
     };
     lines.push(Line::from(Span::styled(
         hint,
@@ -989,7 +1049,7 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
     )));
 
     let popup = Paragraph::new(lines)
-        .block(make_popup_block("Add Project", t().accent))
+        .block(make_popup_block(app.tr(Msg::AddProject), t().accent))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1005,20 +1065,28 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
     let tls_active = matches!(form.field, AddField::Tls);
 
     let text_fields: &[(&str, &str, bool)] = &[
-        ("Name", &form.name, matches!(form.field, AddField::Name)),
         (
-            "Domain",
+            app.tr(Msg::LabelName),
+            &form.name,
+            matches!(form.field, AddField::Name),
+        ),
+        (
+            app.tr(Msg::LabelDomain),
             &form.domain,
             matches!(form.field, AddField::Domain),
         ),
         (
-            "Aliases",
+            app.tr(Msg::LabelAliases),
             &form.aliases,
             matches!(form.field, AddField::Aliases),
         ),
-        ("Port", &form.port, matches!(form.field, AddField::Port)),
         (
-            "Upstream",
+            app.tr(Msg::LabelPort),
+            &form.port,
+            matches!(form.field, AddField::Port),
+        ),
+        (
+            app.tr(Msg::LabelUpstream),
             &form.upstream_host,
             matches!(form.field, AddField::UpstreamHost),
         ),
@@ -1048,10 +1116,10 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
         t().text_dim
     };
     let mut type_spans = vec![Span::styled(
-        format!("  {:<10}", "Type"),
+        format!("  {:<10}", app.tr(Msg::LabelType)),
         Style::default().fg(label_color),
     )];
-    let options = super::app::TYPE_OPTIONS;
+    let options = &form.type_ids;
     for (i, opt) in options.iter().enumerate() {
         if i == form.type_index {
             type_spans.push(Span::styled(
@@ -1070,7 +1138,7 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
     // TLS selector
     let tls_label_color = if tls_active { t().accent } else { t().text_dim };
     let mut tls_spans = vec![Span::styled(
-        format!("  {:<10}", "TLS"),
+        format!("  {:<10}", app.tr(Msg::LabelTls)),
         Style::default().fg(tls_label_color),
     )];
     for (is_on, label) in [(false, "off"), (true, "on")] {
@@ -1099,7 +1167,7 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
     };
     lines.push(Line::from(vec![
         Span::styled(
-            format!("  {:<10}", "Directory"),
+            format!("  {:<10}", app.tr(Msg::LabelDirectory)),
             Style::default().fg(path_label_color),
         ),
         Span::styled(path_str, Style::default().fg(t().text)),
@@ -1115,9 +1183,9 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
 
     lines.push(Line::from(""));
     let hint = if type_active || tls_active {
-        "  \u{2190}/\u{2192} select option  Enter: next  Esc: cancel"
+        app.tr(Msg::FormHintSelect)
     } else {
-        "  Enter: next field  Esc: cancel"
+        app.tr(Msg::FormHintText)
     };
     lines.push(Line::from(Span::styled(
         hint,
@@ -1125,7 +1193,7 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
     )));
 
     let popup = Paragraph::new(lines)
-        .block(make_popup_block("Edit Project", t().accent))
+        .block(make_popup_block(app.tr(Msg::EditProject), t().accent))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1133,9 +1201,14 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
 
 // ── Confirm dialog ─────────────────────────────────────────────────────────
 
-fn draw_confirm_dialog(frame: &mut Frame, message: &str) {
+fn draw_confirm_dialog(frame: &mut Frame, app: &App, action: ConfirmAction) {
     let area = centered_rect(40, 20, frame.area());
     frame.render_widget(Clear, area);
+
+    let message = match action {
+        ConfirmAction::StopProject(name) => app.trf(Msg::ConfirmStop, &[("name", &name)]),
+        ConfirmAction::RemoveProject(name) => app.trf(Msg::ConfirmRemove, &[("name", &name)]),
+    };
 
     let text = vec![
         Line::from(""),
@@ -1146,7 +1219,7 @@ fn draw_confirm_dialog(frame: &mut Frame, message: &str) {
     ];
 
     let popup = Paragraph::new(text)
-        .block(make_popup_block("Confirm", t().warn))
+        .block(make_popup_block(app.tr(Msg::Confirm), t().warn))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1159,19 +1232,20 @@ fn draw_unmanaged_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
 
     let filter_label = if app.unmanaged_show_unknown {
-        "all"
+        app.tr(Msg::FilterAll)
     } else {
-        "dev-only"
+        app.tr(Msg::FilterDevOnly)
     };
     let port_label = if app.unmanaged_web_only {
-        "web"
+        app.tr(Msg::FilterWeb)
     } else {
-        "all-ports"
+        app.tr(Msg::FilterAllPorts)
     };
 
     let block = make_popup_block(
         &format!(
-            "Unmanaged Services [{}|{}] {}/{}",
+            "{} [{}|{}] {}/{}",
+            app.tr(Msg::Unmanaged),
             filter_label,
             port_label,
             app.unmanaged_services.len(),
@@ -1184,12 +1258,12 @@ fn draw_unmanaged_popup(frame: &mut Frame, app: &App) {
         let empty = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  No unmanaged listening services found",
+                format!("  {}", app.tr(Msg::UnmanagedEmpty)),
                 Style::default().fg(t().text_dim),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "  f stack-filter  w port-filter  r refresh  Esc close",
+                format!("  {}", app.tr(Msg::UnmanagedFilterHint)),
                 Style::default().fg(t().text_dim),
             )),
         ])
@@ -1227,19 +1301,19 @@ fn draw_unmanaged_popup(frame: &mut Frame, app: &App) {
     items.push(ListItem::new(Line::from("")));
     items.push(ListItem::new(Line::from(vec![
         Span::styled(" Enter ", key_bg),
-        Span::styled("inspect  ", hint_style),
+        Span::styled(format!("{}  ", app.tr(Msg::ActionInspect)), hint_style),
         Span::styled(" i ", key_bg),
-        Span::styled("import  ", hint_style),
+        Span::styled(format!("{}  ", app.tr(Msg::ActionImport)), hint_style),
         Span::styled(" I ", key_bg),
-        Span::styled("ignore  ", hint_style),
+        Span::styled(format!("{}  ", app.tr(Msg::ActionIgnore)), hint_style),
         Span::styled(" f ", key_bg),
-        Span::styled("stack  ", hint_style),
+        Span::styled(format!("{}  ", app.tr(Msg::ActionStack)), hint_style),
         Span::styled(" w ", key_bg),
-        Span::styled("ports  ", hint_style),
+        Span::styled(format!("{}  ", app.tr(Msg::ActionPorts)), hint_style),
         Span::styled(" r ", key_bg),
-        Span::styled("refresh  ", hint_style),
+        Span::styled(format!("{}  ", app.tr(Msg::ActionRefresh)), hint_style),
         Span::styled(" Esc ", key_bg),
-        Span::styled("close", hint_style),
+        Span::styled(app.tr(Msg::ActionClose), hint_style),
     ])));
 
     let mut state = ListState::default();
@@ -1256,21 +1330,39 @@ fn draw_unmanaged_popup(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_unmanaged_detail(frame: &mut Frame, service: &ServiceInfo) {
+fn draw_unmanaged_detail(frame: &mut Frame, app: &App, service: &ServiceInfo) {
     let area = centered_rect(65, 50, frame.area());
     frame.render_widget(Clear, area);
 
     let text = vec![
-        Line::from(format!("  Port:        {}", service.port)),
-        Line::from(format!("  PID:         {}", service.pid)),
-        Line::from(format!("  Stack guess: {}", service.stack.label())),
-        Line::from(format!("  Command:     {}", service.command)),
         Line::from(format!(
-            "  CWD:         {}",
+            "  {}:        {}",
+            app.tr(Msg::LabelPort),
+            service.port
+        )),
+        Line::from(format!(
+            "  {}:         {}",
+            app.tr(Msg::LabelPid),
+            service.pid
+        )),
+        Line::from(format!(
+            "  {}: {}",
+            app.tr(Msg::LabelStackGuess),
+            service.stack.label()
+        )),
+        Line::from(format!(
+            "  {}:     {}",
+            app.tr(Msg::LabelCommand),
+            service.command
+        )),
+        Line::from(format!(
+            "  {}:         {}",
+            app.tr(Msg::LabelCwd),
             service.cwd.as_deref().unwrap_or("-")
         )),
         Line::from(format!(
-            "  Command line:{}{}",
+            "  {}:{}{}",
+            app.tr(Msg::LabelCmdLine),
             if service.command_line.is_some() {
                 " "
             } else {
@@ -1280,13 +1372,13 @@ fn draw_unmanaged_detail(frame: &mut Frame, service: &ServiceInfo) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  Enter/Esc closes this detail",
+            format!("  {}", app.tr(Msg::DetailCloseHint)),
             Style::default().fg(t().text_dim),
         )),
     ];
 
     let popup = Paragraph::new(text)
-        .block(make_popup_block("Service Details", t().warn))
+        .block(make_popup_block(app.tr(Msg::Details), t().warn))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);

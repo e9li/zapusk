@@ -2,12 +2,17 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 
-use crate::core::config::{CaddyConfig, ProjectConfig, ProjectType};
+use crate::core::config::{CaddyConfig, ProjectConfig};
+use crate::core::framework::{CaddyProfile, FrameworkRegistry, SubstContext, substitute};
 
 /// Generate a Caddyfile from all project configs.
 /// If `project.tls = true`, the site uses `https://...` with `tls internal`.
 /// Otherwise the site is served as plain `http://...`.
-pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig) -> String {
+pub fn generate_caddyfile(
+    projects: &[ProjectConfig],
+    caddy_config: &CaddyConfig,
+    frameworks: &FrameworkRegistry,
+) -> String {
     let mut out = String::new();
 
     // Global options: send Caddy's own logs to a file so they don't pollute the terminal/TUI
@@ -35,73 +40,70 @@ pub fn generate_caddyfile(projects: &[ProjectConfig], caddy_config: &CaddyConfig
             out.push_str("\ttls internal\n");
         }
 
-        if project.project_type == ProjectType::Kirby {
-            // Kirby: serve static files from Caddy, proxy dynamic requests to PHP
-            let doc_root = if project.public_dir.as_deref() == Some("/") {
-                project.path.clone()
-            } else {
-                let sub = project.public_dir.as_deref().unwrap_or("public");
-                format!("{}/{}", project.path, sub)
-            };
+        let spec = frameworks.get(&project.project_type);
+        let profile = spec.map(|s| s.caddy.profile).unwrap_or(CaddyProfile::Proxy);
+
+        if profile == CaddyProfile::StaticPlusProxy {
+            let ctx = SubstContext::from_project(project, None);
+            let doc_root = spec
+                .and_then(|s| s.caddy.root.as_deref())
+                .map(|t| substitute(t, &ctx))
+                .unwrap_or_else(|| ctx.root.clone());
+            let block_paths: Vec<String> = spec
+                .map(|s| {
+                    s.caddy
+                        .block_paths
+                        .iter()
+                        .map(|p| substitute(p, &ctx))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             out.push_str(&format!("\troot * {}\n", doc_root));
             out.push_str("\tencode zstd gzip\n");
-            out.push_str("\t@blocked {\n");
-            out.push_str("\t\tpath /content/* /site/* /kirby/* /.*\n");
-            out.push_str("\t}\n");
-            out.push_str("\terror @blocked \"Not found\" 404\n");
+            if !block_paths.is_empty() {
+                out.push_str("\t@blocked {\n");
+                out.push_str(&format!("\t\tpath {}\n", block_paths.join(" ")));
+                out.push_str("\t}\n");
+                out.push_str("\terror @blocked \"Not found\" 404\n");
+            }
             out.push_str("\t@static file\n");
             out.push_str("\thandle @static {\n");
             out.push_str("\t\tfile_server\n");
             out.push_str("\t}\n");
             out.push_str("\thandle {\n");
-
-            if let Some(host) = project
-                .upstream_host
-                .as_deref()
-                .map(str::trim)
-                .filter(|h| !h.is_empty())
-            {
-                out.push_str(&format!(
-                    "\t\treverse_proxy {}\n",
-                    format_host_port(host, project.port)
-                ));
-            } else {
-                out.push_str(&format!(
-                    "\t\treverse_proxy 127.0.0.1:{} [::1]:{} {{\n",
-                    project.port, project.port
-                ));
-                out.push_str("\t\t\tlb_policy first\n");
-                out.push_str("\t\t}\n");
-            }
-
+            write_reverse_proxy(&mut out, project, "\t\t");
             out.push_str("\t}\n");
         } else {
-            // Non-Kirby: simple reverse proxy
-            if let Some(host) = project
-                .upstream_host
-                .as_deref()
-                .map(str::trim)
-                .filter(|h| !h.is_empty())
-            {
-                out.push_str(&format!(
-                    "\treverse_proxy {}\n",
-                    format_host_port(host, project.port)
-                ));
-            } else {
-                out.push_str(&format!(
-                    "\treverse_proxy 127.0.0.1:{} [::1]:{} {{\n",
-                    project.port, project.port
-                ));
-                out.push_str("\t\tlb_policy first\n");
-                out.push_str("\t}\n");
-            }
+            write_reverse_proxy(&mut out, project, "\t");
         }
 
         out.push_str("}\n\n");
     }
 
     out
+}
+
+fn write_reverse_proxy(out: &mut String, project: &ProjectConfig, indent: &str) {
+    if let Some(host) = project
+        .upstream_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        out.push_str(&format!(
+            "{}reverse_proxy {}\n",
+            indent,
+            format_host_port(host, project.port)
+        ));
+    } else {
+        out.push_str(&format!(
+            "{}reverse_proxy 127.0.0.1:{} [::1]:{} {{\n",
+            indent, project.port, project.port
+        ));
+        out.push_str(&format!("{}\tlb_policy first\n", indent));
+        out.push_str(&format!("{}}}\n", indent));
+    }
 }
 
 fn format_host_port(host: &str, port: u16) -> String {
@@ -118,8 +120,9 @@ fn format_host_port(host: &str, port: u16) -> String {
 pub async fn write_and_reload(
     projects: &[ProjectConfig],
     caddy_config: &CaddyConfig,
+    frameworks: &FrameworkRegistry,
 ) -> Result<()> {
-    let content = generate_caddyfile(projects, caddy_config);
+    let content = generate_caddyfile(projects, caddy_config, frameworks);
     let path = Path::new(&caddy_config.config_path);
 
     // Ensure parent directory exists
@@ -221,4 +224,71 @@ async fn start_caddy_run(caddy_config: &CaddyConfig) -> Result<()> {
     }
 
     anyhow::bail!("Caddy started but admin API not reachable after 2s")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::framework::{FrameworkId, FrameworkRegistry};
+
+    fn project(id: &str, path: &str, port: u16) -> ProjectConfig {
+        ProjectConfig {
+            name: "demo".into(),
+            domain: "demo.test".into(),
+            aliases: vec![],
+            port,
+            project_type: FrameworkId::new(id),
+            path: path.into(),
+            php_version: None,
+            public_dir: None,
+            command: None,
+            compose_file: None,
+            service: None,
+            compose_profiles: vec![],
+            upstream_host: None,
+            args: vec![],
+            env: Default::default(),
+            autostart: false,
+            tls: false,
+        }
+    }
+
+    fn caddy_cfg() -> CaddyConfig {
+        CaddyConfig {
+            config_path: "/tmp/zapusk-test/Caddyfile".into(),
+            caddy_bin: None,
+            fpm_socket_template: None,
+        }
+    }
+
+    #[test]
+    fn phoenix_site_is_plain_proxy() {
+        let reg = FrameworkRegistry::builtins_only();
+        let content =
+            generate_caddyfile(&[project("phoenix", "/tmp/shop", 4000)], &caddy_cfg(), &reg);
+        assert!(content.contains("http://demo.test {"));
+        assert!(content.contains("reverse_proxy 127.0.0.1:4000 [::1]:4000"));
+        assert!(!content.contains("file_server"));
+        assert!(!content.contains("root *"));
+    }
+
+    #[test]
+    fn kirby_site_serves_static_and_blocks_paths() {
+        let reg = FrameworkRegistry::builtins_only();
+        let content =
+            generate_caddyfile(&[project("kirby", "/tmp/site", 8001)], &caddy_cfg(), &reg);
+        assert!(content.contains("root * /tmp/site/public"));
+        assert!(content.contains("file_server"));
+        assert!(content.contains("path /content/* /site/* /kirby/* /.*"));
+        assert!(content.contains("reverse_proxy 127.0.0.1:8001 [::1]:8001"));
+    }
+
+    #[test]
+    fn unknown_type_falls_back_to_proxy() {
+        let reg = FrameworkRegistry::builtins_only();
+        let content =
+            generate_caddyfile(&[project("rails", "/tmp/blog", 3000)], &caddy_cfg(), &reg);
+        assert!(content.contains("reverse_proxy 127.0.0.1:3000 [::1]:3000"));
+        assert!(!content.contains("file_server"));
+    }
 }

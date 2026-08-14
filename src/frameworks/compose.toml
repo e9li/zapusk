@@ -1,0 +1,20 @@
+id = "compose"
+label = "compose"
+
+[start]
+command = "docker"
+args = ["compose", "up", "--no-color"]
+
+[lifecycle]
+kind = "compose"
+ready_attempts = 40
+
+[caddy]
+profile = "proxy"
+
+[doctor]
+binaries = ["docker"]
+marker_files = []
+
+[discovery]
+command_contains = ["docker-proxy"]

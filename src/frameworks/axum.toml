@@ -1,0 +1,20 @@
+id = "axum"
+label = "axum"
+
+[start]
+command = "cargo"
+args = ["run"]
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "proxy"
+
+[doctor]
+binaries = ["cargo"]
+marker_files = ["Cargo.toml"]
+
+[discovery]
+command_contains = ["cargo", "rust", "/target/debug/"]

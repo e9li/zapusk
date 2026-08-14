@@ -5,6 +5,66 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15]
+
+### Added
+
+- French and Italian UI (`locales/fr.toml`, `locales/it.toml`). `l` now cycles
+  English → Deutsch → Français → Italiano → Srpski → Русский.
+
+## [0.1.14]
+
+### Changed
+
+- UI translations moved from Rust `match` arms to [`locales/*.toml`](locales/).
+  Translators can edit those files directly. Missing keys fall back to English.
+  `~/.config/zapusk/locales/<code>.toml` overlays the shipped file.
+
+## [0.1.13]
+
+### Added
+
+- **UI languages**: English, German, Serbian (Latin), and Russian. Set
+  `language = "de"` (or `sr` / `ru` / `en`) in `config.toml`, or press `l` in
+  the TUI to cycle. If unset, zapusk uses `LANG` / `LC_MESSAGES`. The choice is
+  saved back to the config.
+
+## [0.1.12]
+
+### Added
+
+- **Config hot-reload**: the TUI polls `config.toml` and updates the project list
+  when the file changes (another editor, `zapusk add`, …). Running processes are
+  never started or stopped by a reload; removed running projects are forgotten
+  and left alive (same as `q`). Command/port/path changes on a running project
+  take effect on the next start. Invalid TOML is ignored and reported in the
+  status bar. Reloads are deferred while the add/edit/confirm UI is open. TUI
+  saves of the same file do not flicker a reload.
+- **Shell completions**: `zapusk completions <shell>` prints a clap-generated
+  script for bash, zsh, fish, elvish, or powershell.
+
+## [0.1.11]
+
+### Added
+
+- **Framework recipes**: project types are now TOML specs, not a closed Rust enum.
+  Built-ins (`phoenix`, `symfony`, `kirby`, `axum`, `compose`) ship inside the
+  binary and keep working with existing `config.toml` files.
+  Drop a file in `~/.config/zapusk/frameworks/<id>.toml` to add Rails, Laravel,
+  Express, or anything else — no recompile. User files with the same `id` override
+  a built-in. Example recipes live in `frameworks.example/`.
+- `zapusk doctor` lists loaded framework recipes and their source (builtin/user).
+- `zapusk init` / `zapusk add` create the user `frameworks/` directory.
+
+### Changed
+
+- `type` in `config.toml` is a free string looked up in the recipe registry.
+  Unknown types fail at start/doctor with a pointer to the frameworks directory.
+- Caddy site generation, start commands, env vars, doctor checks, discovery
+  import, and domain-verify timeouts all come from the recipe (plus a small
+  closed set of hooks: PHP version file, PHP binary, compose lifecycle,
+  `static_plus_proxy`).
+
 ## [0.1.10]
 
 ### Fixed

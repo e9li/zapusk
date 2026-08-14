@@ -7,6 +7,7 @@ use crate::cli::doctor;
 use crate::cli::spinner::Spinner;
 use crate::core::caddy;
 use crate::core::config::Config;
+use crate::core::framework::{FrameworkRegistry, ensure_frameworks_dir};
 use crate::platform;
 
 pub async fn run() -> Result<()> {
@@ -304,13 +305,16 @@ async fn step_config(tld: &str) -> Result<()> {
     }
 
     // Try to generate Caddyfile if config has projects
+    let _ = ensure_frameworks_dir();
+
     if let Ok(config) = Config::load() {
         if let Some(ref caddy_cfg) = config.caddy {
             if config.projects.is_empty() {
                 println!("      No projects yet — add one with `zapusk add`");
             } else if prompt_yn("      Write Caddyfile and reload Caddy?") {
+                let frameworks = FrameworkRegistry::load();
                 let sp = Spinner::start("Writing Caddyfile and reloading Caddy...");
-                match caddy::write_and_reload(&config.projects, caddy_cfg).await {
+                match caddy::write_and_reload(&config.projects, caddy_cfg, &frameworks).await {
                     Ok(()) => sp.done("Caddyfile written and Caddy reloaded").await,
                     Err(e) => sp.fail(&format!("{}", e)).await,
                 }
@@ -327,8 +331,9 @@ async fn step_config(tld: &str) -> Result<()> {
 async fn step_docker() -> Result<()> {
     println!("\n[6/6] Checking Docker (compose projects)...");
 
+    let frameworks = FrameworkRegistry::load();
     let has_compose = Config::load()
-        .map(|c| doctor::has_compose_projects(&c))
+        .map(|c| doctor::has_compose_projects(&c, &frameworks))
         .unwrap_or(false);
     if !has_compose {
         println!("      \u{2713} Skipped — no compose projects in config");
@@ -340,7 +345,11 @@ async fn step_docker() -> Result<()> {
         if check.ok {
             println!("      \u{2713} {}", check.detail);
         } else {
-            let mark = if check.is_warning { '\u{26a0}' } else { '\u{2717}' };
+            let mark = if check.is_warning {
+                '\u{26a0}'
+            } else {
+                '\u{2717}'
+            };
             println!("      {} {}", mark, check.detail);
             if let Some(hint) = &check.fix_hint {
                 println!("      \u{2192} {}", hint);

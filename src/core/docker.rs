@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
@@ -97,7 +97,7 @@ fn base_args(cli: &ComposeCli, file: Option<&Path>, profiles: &[String]) -> Vec<
 }
 
 /// Build the foreground `up` command for a compose project.
-/// Returns `(bin, args, notes)` matching the shape of `ProjectType::start_command`.
+/// Returns `(bin, args, notes)` matching the shape of `FrameworkSpec::resolve_start`.
 pub async fn up_command(config: &ProjectConfig) -> Result<(String, Vec<String>, Vec<String>)> {
     let cli = compose_cli().await?;
     let compose_file = config.resolve_compose_file()?;
@@ -162,7 +162,7 @@ pub async fn logs_follow_command(config: &ProjectConfig) -> Result<(String, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::ProjectType;
+    use crate::core::framework::FrameworkId;
     use std::os::unix::fs::PermissionsExt;
 
     fn compose_project(dir: &Path) -> ProjectConfig {
@@ -171,7 +171,7 @@ mod tests {
             domain: "shop.test".into(),
             aliases: vec![],
             port: 8080,
-            project_type: ProjectType::Compose,
+            project_type: FrameworkId::new("compose"),
             path: dir.display().to_string(),
             php_version: None,
             public_dir: None,

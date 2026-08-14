@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
 
-use crate::platform;
+use crate::core::framework::FrameworkId;
+use crate::i18n::Language;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -21,12 +20,15 @@ pub struct Config {
     pub ignored_services: Vec<IgnoredService>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ThemeConfig>,
+    /// UI language (`en`, `de`, `sr`, `ru`). Unset → detect from LANG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<Language>,
 }
 
 /// Optional color overrides for the TUI.
 /// Each field accepts a hex color string like "#64b4dc" or a named color
 /// like "red", "green", "cyan", "white", "darkgray", "lightgreen", etc.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub struct ThemeConfig {
     pub border: Option<String>,
     pub border_focus: Option<String>,
@@ -43,7 +45,7 @@ fn default_tld() -> String {
     "test".into()
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ProjectConfig {
     pub name: String,
     pub domain: String,
@@ -52,7 +54,7 @@ pub struct ProjectConfig {
     pub aliases: Vec<String>,
     pub port: u16,
     #[serde(rename = "type")]
-    pub project_type: ProjectType,
+    pub project_type: FrameworkId,
     pub path: String,
     /// Preferred PHP version. For Kirby projects it selects the `php` binary
     /// directly; for Symfony projects it drives the `.php-version` file that
@@ -106,8 +108,7 @@ pub const COMPOSE_FILE_CANDIDATES: &[&str] = &[
 impl ProjectConfig {
     /// Iterator over the primary domain and all aliases.
     pub fn all_hostnames(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.domain.as_str())
-            .chain(self.aliases.iter().map(String::as_str))
+        std::iter::once(self.domain.as_str()).chain(self.aliases.iter().map(String::as_str))
     }
 
     /// Resolve the compose file for a compose project: the explicit
@@ -141,20 +142,11 @@ impl ProjectConfig {
     }
 }
 
-/// Make a Symfony project's `.php-version` file match its zapusk `php_version`
-/// config, so the Symfony CLI runs the project under the intended PHP.
-///
-/// The Symfony CLI picks the PHP version solely from a `.php-version` file in
-/// the project root (there is no command-line flag). zapusk treats its own
-/// config as the single source of truth and manages that file accordingly:
-/// when `php_version` is set, the file is written (or overwritten) to match;
-/// when it is unset, any existing `.php-version` is removed so the project
-/// falls back to the default PHP. Returns diagnostic notes.
-pub fn ensure_symfony_php_version(config: &ProjectConfig) -> Vec<String> {
-    if config.project_type != ProjectType::Symfony {
-        return vec![];
-    }
-
+/// Keep a project's `.php-version` file in sync with `php_version` in config.
+/// Used by recipes that set `hooks.sync_php_version` (Symfony CLI reads this
+/// file; there is no command-line flag). When `php_version` is set the file is
+/// written; when it is unset any existing file is removed. Returns notes.
+pub fn ensure_php_version_file(config: &ProjectConfig) -> Vec<String> {
     let path = std::path::Path::new(&config.path).join(".php-version");
     let existing = std::fs::read_to_string(&path)
         .ok()
@@ -169,7 +161,7 @@ pub fn ensure_symfony_php_version(config: &ProjectConfig) -> Vec<String> {
     match version {
         Some(version) => {
             if existing.as_deref() == Some(version) {
-                return vec![];
+                return vec![format!("PHP version {} (from .php-version)", version)];
             }
             match std::fs::write(&path, format!("{}\n", version)) {
                 Ok(()) => vec![format!(
@@ -191,9 +183,7 @@ pub fn ensure_symfony_php_version(config: &ProjectConfig) -> Vec<String> {
                 return vec![];
             }
             match std::fs::remove_file(&path) {
-                Ok(()) => vec![
-                    "removed .php-version (no php_version set in config)".to_string(),
-                ],
+                Ok(()) => vec!["removed .php-version (no php_version set in config)".to_string()],
                 Err(e) => vec![format!(
                     "could not remove {} (no php_version in config): {}",
                     path.display(),
@@ -212,107 +202,7 @@ pub fn parse_aliases(raw: &str) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ProjectType {
-    Phoenix,
-    Symfony,
-    Kirby,
-    Axum,
-    Compose,
-}
-
-impl ProjectType {
-    pub fn label(&self) -> &str {
-        match self {
-            ProjectType::Phoenix => "phoenix",
-            ProjectType::Symfony => "symfony",
-            ProjectType::Kirby => "kirby",
-            ProjectType::Axum => "axum",
-            ProjectType::Compose => "compose",
-        }
-    }
-
-    /// Returns `(binary, args, notes)` to start this project type.
-    /// Notes are diagnostic strings to be logged before the process starts.
-    /// The command is run from the project's `path`.
-    pub fn start_command(&self, config: &ProjectConfig) -> (String, Vec<String>, Vec<String>) {
-        match self {
-            ProjectType::Phoenix => ("mix".into(), vec!["phx.server".into()], vec![]),
-            ProjectType::Symfony => {
-                let args = vec![
-                    "server:start".into(),
-                    "--no-tls".into(),
-                    "--port".into(),
-                    config.port.to_string(),
-                ];
-                let mut notes = vec![];
-                // The Symfony CLI selects the PHP version from a `.php-version`
-                // file in the project root (it has no command-line flag for it).
-                // `ensure_symfony_php_version` keeps that file in sync with the
-                // configured `php_version` before we get here; this only reports
-                // the effective version for the log.
-                let php_version_path = std::path::Path::new(&config.path).join(".php-version");
-                if let Ok(version) = std::fs::read_to_string(&php_version_path) {
-                    let version = version.trim().to_string();
-                    if !version.is_empty() {
-                        notes.push(format!("PHP version {} (from .php-version)", version));
-                    }
-                }
-                ("symfony".into(), args, notes)
-            }
-            ProjectType::Kirby => {
-                let (php_bin, notes) =
-                    platform::php_binary_resolved(config.php_version.as_deref());
-                let doc_root = config.public_dir.as_deref().unwrap_or("public");
-                let mut args = vec![
-                    "-S".into(),
-                    format!("{}:{}", config.domain, config.port),
-                ];
-                if doc_root != "/" {
-                    args.push("-t".into());
-                    args.push(doc_root.into());
-                }
-                args.push("kirby/router.php".into());
-                (php_bin, args, notes)
-            }
-            ProjectType::Axum => ("cargo".into(), vec!["run".into()], vec![]),
-            // Compose projects are normally started via core::docker (compose
-            // CLI detection + resolved compose file); this is a plain fallback.
-            ProjectType::Compose => (
-                "docker".into(),
-                vec!["compose".into(), "up".into(), "--no-color".into()],
-                vec![],
-            ),
-        }
-    }
-}
-
-impl fmt::Display for ProjectType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-impl FromStr for ProjectType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "phoenix" => Ok(ProjectType::Phoenix),
-            "symfony" => Ok(ProjectType::Symfony),
-            "kirby" => Ok(ProjectType::Kirby),
-            "axum" => Ok(ProjectType::Axum),
-            "compose" => Ok(ProjectType::Compose),
-            other => anyhow::bail!(
-                "Unknown project type: '{}'. Use: phoenix, symfony, kirby, axum, compose",
-                other
-            ),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct CaddyConfig {
     pub config_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,7 +212,7 @@ pub struct CaddyConfig {
     pub fpm_socket_template: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct DiscoveryConfig {
     #[serde(default = "default_web_ports")]
     pub web_ports: Vec<String>,
@@ -338,7 +228,7 @@ fn default_web_ports() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct IgnoredService {
     pub port: u16,
     pub command: String,
@@ -369,11 +259,17 @@ impl Config {
 pub fn is_valid_tld(tld: &str) -> bool {
     !tld.is_empty()
         && tld.len() <= 63
-        && tld
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && tld.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         && !tld.starts_with('-')
         && !tld.ends_with('-')
+}
+
+pub fn hash_config_bytes(bytes: &[u8]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn config_path() -> PathBuf {
@@ -408,8 +304,11 @@ mod tests {
             compose_profiles = ["dev"]
             "#,
         );
-        assert_eq!(project.project_type, ProjectType::Compose);
-        assert_eq!(project.compose_file.as_deref(), Some("docker-compose.dev.yml"));
+        assert_eq!(project.project_type.as_str(), "compose");
+        assert_eq!(
+            project.compose_file.as_deref(),
+            Some("docker-compose.dev.yml")
+        );
         assert_eq!(project.service.as_deref(), Some("web"));
         assert_eq!(project.compose_profiles, vec!["dev"]);
     }
@@ -426,19 +325,20 @@ mod tests {
             path = "/tmp/api"
             "#,
         );
-        assert_eq!(project.project_type, ProjectType::Axum);
+        assert_eq!(project.project_type.as_str(), "axum");
         assert_eq!(project.compose_file, None);
         assert_eq!(project.service, None);
         assert!(project.compose_profiles.is_empty());
     }
 
     #[test]
-    fn project_type_from_str_accepts_compose() {
+    fn project_type_from_str_accepts_any_id() {
         assert_eq!(
-            "compose".parse::<ProjectType>().unwrap(),
-            ProjectType::Compose
+            "compose".parse::<FrameworkId>().unwrap().as_str(),
+            "compose"
         );
-        assert!("docker".parse::<ProjectType>().is_err());
+        assert_eq!("rails".parse::<FrameworkId>().unwrap().as_str(), "rails");
+        assert!("docker compose".parse::<FrameworkId>().is_err());
     }
 
     #[test]
@@ -475,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_symfony_php_version_manages_file_from_config() {
+    fn ensure_php_version_file_manages_file_from_config() {
         let dir = std::env::temp_dir().join(format!("zapusk-php-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let php_version_path = dir.join(".php-version");
@@ -494,19 +394,20 @@ mod tests {
         ));
 
         // Missing file -> written from config, with a note.
-        let notes = ensure_symfony_php_version(&project);
+        let notes = ensure_php_version_file(&project);
         assert_eq!(
             std::fs::read_to_string(&php_version_path).unwrap().trim(),
             "8.3"
         );
         assert!(notes.iter().any(|n| n.contains("wrote .php-version")));
 
-        // Matching file -> no-op, no notes.
-        assert!(ensure_symfony_php_version(&project).is_empty());
+        // Matching file -> note the effective version, no rewrite.
+        let notes = ensure_php_version_file(&project);
+        assert!(notes.iter().any(|n| n.contains("from .php-version")));
 
         // Differing file -> overwritten so config stays authoritative.
         std::fs::write(&php_version_path, "8.4\n").unwrap();
-        let notes = ensure_symfony_php_version(&project);
+        let notes = ensure_php_version_file(&project);
         assert_eq!(
             std::fs::read_to_string(&php_version_path).unwrap().trim(),
             "8.3"
@@ -515,22 +416,12 @@ mod tests {
 
         // php_version cleared -> existing file removed.
         project.php_version = None;
-        let notes = ensure_symfony_php_version(&project);
+        let notes = ensure_php_version_file(&project);
         assert!(!php_version_path.exists());
         assert!(notes.iter().any(|n| n.contains("removed .php-version")));
 
         // No config and no file -> no-op.
-        assert!(ensure_symfony_php_version(&project).is_empty());
-
-        // Non-Symfony projects are ignored entirely (file left alone).
-        std::fs::write(&php_version_path, "8.4\n").unwrap();
-        let mut kirby = project.clone();
-        kirby.project_type = ProjectType::Kirby;
-        assert!(ensure_symfony_php_version(&kirby).is_empty());
-        assert_eq!(
-            std::fs::read_to_string(&php_version_path).unwrap().trim(),
-            "8.4"
-        );
+        assert!(ensure_php_version_file(&project).is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

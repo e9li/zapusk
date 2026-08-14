@@ -1,5 +1,10 @@
 # zapusk config
 # Place at ~/.config/zapusk/config.toml
+#
+# Extra project types: drop a recipe in ~/.config/zapusk/frameworks/<id>.toml
+# (see frameworks.example/ for rails, laravel, express) then set type = "<id>".
+
+# language = "en"  # optional: en, de, fr, it, sr, ru — unset uses LANG; press `l` in the TUI to cycle
 
 # tld = "test"  # optional, defaults to "test" — used by init/doctor/add for DNS setup
 
