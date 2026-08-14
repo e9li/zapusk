@@ -306,6 +306,7 @@ async fn step_config(tld: &str) -> Result<()> {
 
     // Try to generate Caddyfile if config has projects
     let _ = ensure_frameworks_dir();
+    let _ = crate::tui::theme::ensure_themes_dir();
 
     if let Ok(config) = Config::load() {
         if let Some(ref caddy_cfg) = config.caddy {

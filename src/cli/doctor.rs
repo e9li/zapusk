@@ -95,6 +95,21 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Color themes
+    {
+        println!("\nThemes");
+        for r in check_themes(config.as_ref()) {
+            print_check(&r);
+            if !r.ok {
+                if r.is_warning {
+                    warnings += 1;
+                } else {
+                    issues += 1;
+                }
+            }
+        }
+    }
+
     // PHP checks (only if a recipe asks for PHP)
     if let Some(ref cfg) = config {
         let php_versions = collect_php_versions(cfg, &frameworks);
@@ -531,6 +546,42 @@ fn check_frameworks(frameworks: &FrameworkRegistry) -> Vec<CheckResult> {
         results.push(CheckResult::fail(
             "no framework recipes loaded",
             "this is a bug — builtins should always be present",
+        ));
+    }
+    results
+}
+
+fn check_themes(config: Option<&Config>) -> Vec<CheckResult> {
+    let themes = crate::tui::theme::discover_themes();
+    let mut results = vec![];
+    for meta in &themes {
+        let label = if meta.label != meta.id {
+            format!("{:<14} {:<12} {}", meta.id, meta.source.label(), meta.label)
+        } else {
+            format!("{:<14} {}", meta.id, meta.source.label())
+        };
+        results.push(CheckResult::pass(label));
+    }
+    if let Some(name) = config
+        .and_then(|c| c.theme.as_ref())
+        .and_then(|t| t.name.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let key = name.to_ascii_lowercase();
+        if !themes.iter().any(|m| m.id == key) {
+            results.push(CheckResult::warn(
+                format!("config theme '{name}' is not loaded"),
+                format!(
+                    "add ~/.config/zapusk/themes/{key}.toml or use groknight / terminal / nightfox / catppuccin"
+                ),
+            ));
+        }
+    }
+    if results.is_empty() {
+        results.push(CheckResult::fail(
+            "no color themes loaded",
+            "this is a bug — groknight and terminal should always be present",
         ));
     }
     results

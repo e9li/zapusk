@@ -2,153 +2,73 @@ use chrono::Local;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use std::sync::OnceLock;
-
 use super::app::{ActivePane, AddField, AddForm, App, ConfirmAction, EditForm, ServiceState};
-use crate::core::config::ThemeConfig;
+use super::theme::t;
 use crate::core::discovery::ServiceInfo;
 use crate::core::project::{ProcessOrigin, Project, ProjectStatus};
-use crate::i18n::Msg;
+use crate::i18n::{Language, Msg};
 
-// ── Theme ──────────────────────────────────────────────────────────────────
-
-pub struct Theme {
-    pub border: Color,
-    pub border_focus: Color,
-    pub text: Color,
-    pub text_dim: Color,
-    pub accent: Color,
-    pub ok: Color,
-    pub warn: Color,
-    pub err: Color,
-    pub highlight_bg: Color,
-}
-
-impl Theme {
-    pub const DEFAULT: Theme = Theme {
-        border: Color::Gray,
-        border_focus: Color::LightGreen,
-        text: Color::White,
-        text_dim: Color::DarkGray,
-        accent: Color::LightCyan,
-        ok: Color::LightGreen,
-        warn: Color::Yellow,
-        err: Color::LightRed,
-        highlight_bg: Color::Black,
-    };
-
-    pub fn from_config(cfg: Option<&ThemeConfig>) -> Self {
-        let d = &Self::DEFAULT;
-        let Some(c) = cfg else {
-            return Self::DEFAULT;
-        };
-        Self {
-            border: c
-                .border
-                .as_deref()
-                .and_then(parse_color)
-                .unwrap_or(d.border),
-            border_focus: c
-                .border_focus
-                .as_deref()
-                .and_then(parse_color)
-                .unwrap_or(d.border_focus),
-            text: c.text.as_deref().and_then(parse_color).unwrap_or(d.text),
-            text_dim: c
-                .text_dim
-                .as_deref()
-                .and_then(parse_color)
-                .unwrap_or(d.text_dim),
-            accent: c
-                .accent
-                .as_deref()
-                .and_then(parse_color)
-                .unwrap_or(d.accent),
-            ok: c.ok.as_deref().and_then(parse_color).unwrap_or(d.ok),
-            warn: c.warn.as_deref().and_then(parse_color).unwrap_or(d.warn),
-            err: c.err.as_deref().and_then(parse_color).unwrap_or(d.err),
-            highlight_bg: c
-                .highlight_bg
-                .as_deref()
-                .and_then(parse_color)
-                .unwrap_or(d.highlight_bg),
-        }
-    }
-}
-
-/// Parse a color string: "#rrggbb" hex or named terminal colors.
-fn parse_color(s: &str) -> Option<Color> {
-    let s = s.trim();
-    if let Some(hex) = s.strip_prefix('#') {
-        if hex.len() == 6 {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            return Some(Color::Rgb(r, g, b));
-        }
-        return None;
-    }
-    match s.to_lowercase().as_str() {
-        "black" => Some(Color::Black),
-        "red" => Some(Color::Red),
-        "green" => Some(Color::Green),
-        "yellow" => Some(Color::Yellow),
-        "blue" => Some(Color::Blue),
-        "magenta" => Some(Color::Magenta),
-        "cyan" => Some(Color::Cyan),
-        "gray" | "grey" => Some(Color::Gray),
-        "darkgray" | "darkgrey" => Some(Color::DarkGray),
-        "lightred" => Some(Color::LightRed),
-        "lightgreen" => Some(Color::LightGreen),
-        "lightyellow" => Some(Color::LightYellow),
-        "lightblue" => Some(Color::LightBlue),
-        "lightmagenta" => Some(Color::LightMagenta),
-        "lightcyan" => Some(Color::LightCyan),
-        "white" => Some(Color::White),
-        _ => None,
-    }
-}
-
-static THEME: OnceLock<Theme> = OnceLock::new();
-
-/// Initialize the global theme. Call once at startup from App::new().
-pub fn init_theme(cfg: Option<&ThemeConfig>) {
-    let _ = THEME.set(Theme::from_config(cfg));
-}
-
-/// Get the active theme.
-fn t() -> &'static Theme {
-    THEME.get_or_init(|| Theme::DEFAULT)
-}
+pub use super::theme::init_theme;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn make_block(title: &str, focused: bool) -> Block<'static> {
-    Block::default()
-        .title(format!(" {} ", title))
-        .borders(Borders::ALL)
-        .border_type(if focused {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
-        .border_style(if focused {
-            Style::default().fg(t().border_focus)
-        } else {
-            Style::default().fg(t().border)
-        })
+fn canvas() -> Style {
+    Style::default().bg(t().bg)
 }
 
-fn make_popup_block(title: &str, accent: Color) -> Block<'static> {
+fn inset(area: Rect, pad_x: u16, pad_y: u16) -> Rect {
+    let pad_x = pad_x.min(area.width / 2);
+    let pad_y = pad_y.min(area.height / 2);
+    Rect {
+        x: area.x.saturating_add(pad_x),
+        y: area.y.saturating_add(pad_y),
+        width: area.width.saturating_sub(pad_x.saturating_mul(2)),
+        height: area.height.saturating_sub(pad_y.saturating_mul(2)),
+    }
+}
+
+fn dim_sep() -> Span<'static> {
+    Span::styled(
+        "  |  ",
+        Style::default()
+            .fg(t().text_dim)
+            .add_modifier(Modifier::DIM),
+    )
+}
+
+fn make_block(title: &str, focused: bool) -> Block<'static> {
+    let title_style = if focused {
+        Style::default().fg(t().text)
+    } else {
+        Style::default().fg(t().text_dim)
+    };
     Block::default()
-        .title(format!(" {} ", title))
+        .title(Span::styled(format!(" {title} "), title_style))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(accent))
+        .border_type(BorderType::Plain)
+        .style(canvas())
+        .border_style(Style::default().fg(if focused { t().text_dim } else { t().border }))
+}
+
+fn make_popup_block(title: &str) -> Block<'static> {
+    Block::default()
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(t().text),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .style(canvas())
+        .border_style(Style::default().fg(t().border))
+}
+
+fn selection_style() -> Style {
+    Style::default().bg(t().highlight_bg).fg(t().highlight_fg)
 }
 
 fn detail_row(label: &str, value: &str, value_color: Color) -> Line<'static> {
@@ -215,84 +135,43 @@ fn log_color(line: &str, is_stderr: bool) -> Color {
 // ── Main draw ──────────────────────────────────────────────────────────────
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let area = frame.area();
+    let full = frame.area();
+    frame.render_widget(Block::default().style(canvas()), full);
 
-    // Root: title line | main | hints line
+    // Grok-style canvas: dark padded stage, airy header/footer chrome
+    let area = inset(full, 2, 1);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(area);
 
-    // Title bar — right-aligned, no border
-    let version = env!("CARGO_PKG_VERSION");
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled("[ ", Style::default().fg(t().text)),
-        Span::styled("ZAPUSK", Style::default().fg(t().accent)).add_modifier(Modifier::BOLD),
-        Span::styled(format!(" - v{} ]", version), Style::default().fg(t().text)),
-    ]))
-    .alignment(Alignment::Right);
-    frame.render_widget(title, root[0]);
+    draw_header_bar(frame, app, root[0]);
 
-    // Bottom hints — no border
-    let hints: &[(&str, &str)] = &[
-        ("s ", app.tr(Msg::HintStart)),
-        ("x ", app.tr(Msg::HintStop)),
-        ("r ", app.tr(Msg::HintRestart)),
-        ("a ", app.tr(Msg::HintAdd)),
-        ("e ", app.tr(Msg::HintEdit)),
-        ("D ", app.tr(Msg::HintDel)),
-        ("u ", app.tr(Msg::HintUnmanaged)),
-        ("l ", app.tr(Msg::HintLang)),
-        ("? ", app.tr(Msg::HintHelp)),
-        ("q ", app.tr(Msg::HintQuit)),
-    ];
-    let mut hint_spans: Vec<Span> = vec![Span::raw(" ")];
-    for (key, label) in hints {
-        hint_spans.push(Span::styled(
-            format!("[{}\u{2192}{}]", key, label),
-            Style::default().fg(t().text_dim),
-        ));
-        hint_spans.push(Span::raw(" "));
-    }
-    let hints_bar = Paragraph::new(Line::from(hint_spans));
-    frame.render_widget(hints_bar, root[2]);
-
-    // Main: left column | right column
     let main = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(root[1]);
+        .spacing(2)
+        .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
+        .split(root[2]);
 
-    // Left: projects | details | unmanaged
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(35),
-            Constraint::Percentage(25),
-        ])
+        .spacing(1)
+        .constraints([Constraint::Min(6), Constraint::Length(9)])
         .split(main[0]);
-
-    // Right: logs | status message | services strip
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(3),
-        ])
-        .split(main[1]);
 
     draw_project_list(frame, app, left[0]);
     draw_project_details(frame, app, left[1]);
-    draw_unmanaged_compact(frame, app, left[2]);
-    draw_logs(frame, app, right[0]);
-    draw_status_line(frame, app, right[1]);
-    draw_service_strip(frame, app, right[2]);
+    draw_logs(frame, app, main[1]);
+    draw_prompt_bar(frame, app, root[4]);
+    draw_shortcuts_bar(frame, app, root[6]);
 
     // Overlays
     if app.show_detail_popup {
@@ -302,6 +181,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.show_help {
         draw_help(frame, app);
+    }
+    if app.show_language_popup {
+        draw_language_picker(frame, app);
+    }
+    if app.show_theme_popup {
+        draw_theme_picker(frame, app);
     }
     if let Some(form) = &app.add_form {
         draw_add_form(frame, app, form);
@@ -320,6 +205,186 @@ pub fn draw(frame: &mut Frame, app: &App) {
             }
         }
     }
+}
+
+fn draw_header_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let mut left = vec![
+        Span::styled(" zapusk", Style::default().fg(t().text)),
+        dim_sep(),
+        Span::styled(
+            format!("{}", app.projects.len()),
+            Style::default().fg(t().text),
+        ),
+        Span::styled(
+            format!(" {}", app.tr(Msg::Projects).to_lowercase()),
+            Style::default().fg(t().text_dim),
+        ),
+    ];
+    let unmanaged = app.unmanaged_services.len();
+    if unmanaged > 0 {
+        left.push(dim_sep());
+        left.push(Span::styled(
+            app.trf(Msg::UnmanagedCount, &[("count", &unmanaged.to_string())]),
+            Style::default().fg(t().warn),
+        ));
+    }
+
+    let mut right = service_indicator("caddy", app.caddy_state, app);
+    right.push(dim_sep());
+    right.extend(service_indicator("dnsmasq", app.dnsmasq_state, app));
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(42)])
+        .split(area);
+    frame.render_widget(Paragraph::new(Line::from(left)).style(canvas()), cols[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(right))
+            .style(canvas())
+            .alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+fn draw_prompt_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let mut left = vec![Span::styled(" > ", Style::default().fg(t().text_dim))];
+    if app.search_mode {
+        left.push(Span::styled("/", Style::default().fg(t().text)));
+        left.push(Span::styled(
+            app.search_query.clone(),
+            Style::default().fg(t().text),
+        ));
+        left.push(Span::styled("\u{2588}", Style::default().fg(t().text)));
+    } else if !app.search_query.is_empty() {
+        left.push(Span::styled(
+            format!("filter: {}", app.search_query),
+            Style::default().fg(t().warn),
+        ));
+    } else if let Some(message) = app.status_message.as_deref().filter(|m| !m.is_empty()) {
+        left.push(Span::styled(
+            message.to_string(),
+            Style::default().fg(t().warn),
+        ));
+    } else if let Some(project) = app.projects.get(app.selected) {
+        left.push(Span::styled(
+            project.config.name.clone(),
+            Style::default().fg(t().text),
+        ));
+        left.push(Span::styled(
+            format!("  {}", project.config.domain),
+            Style::default().fg(t().text_dim),
+        ));
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    let right = vec![
+        Span::styled(
+            app.lang.code().to_string(),
+            Style::default().fg(t().text_dim),
+        ),
+        dim_sep(),
+        Span::styled(format!("v{version} "), Style::default().fg(t().text_dim)),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .style(canvas())
+        .border_style(Style::default().fg(t().border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(8), Constraint::Length(16)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(Line::from(left)).style(canvas()), cols[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(right))
+            .style(canvas())
+            .alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+fn draw_shortcuts_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let hints: Vec<(&str, &str)> = if app.confirm_dialog.is_some() {
+        vec![("y", app.tr(Msg::Yes)), ("n", app.tr(Msg::No))]
+    } else if app.show_language_popup || app.show_theme_popup {
+        vec![
+            ("j/k", app.tr(Msg::HelpMove)),
+            ("enter", app.tr(Msg::HintSelect)),
+            ("esc", app.tr(Msg::ActionClose)),
+        ]
+    } else if app.show_unmanaged_detail {
+        vec![("esc", app.tr(Msg::ActionClose))]
+    } else if app.show_unmanaged_popup {
+        vec![
+            ("j/k", app.tr(Msg::HelpMove)),
+            ("enter", app.tr(Msg::ActionInspect)),
+            ("i", app.tr(Msg::ActionImport)),
+            ("I", app.tr(Msg::ActionIgnore)),
+            ("f", app.tr(Msg::ActionStack)),
+            ("w", app.tr(Msg::ActionPorts)),
+            ("r", app.tr(Msg::ActionRefresh)),
+            ("esc", app.tr(Msg::ActionClose)),
+        ]
+    } else if app.add_form.is_some() || app.edit_form.is_some() {
+        vec![
+            ("enter", app.tr(Msg::HintSelect)),
+            ("esc", app.tr(Msg::ActionClose)),
+        ]
+    } else if app.show_help || app.show_detail_popup {
+        vec![("esc", app.tr(Msg::ActionClose))]
+    } else if app.search_mode {
+        vec![
+            ("enter", app.tr(Msg::HintSelect)),
+            ("esc", app.tr(Msg::ActionClose)),
+        ]
+    } else {
+        vec![
+            ("s", app.tr(Msg::HintStart)),
+            ("x", app.tr(Msg::HintStop)),
+            ("r", app.tr(Msg::HintRestart)),
+            ("a", app.tr(Msg::HintAdd)),
+            ("e", app.tr(Msg::HintEdit)),
+            ("D", app.tr(Msg::HintDel)),
+            ("u", app.tr(Msg::HintUnmanaged)),
+            ("l", app.tr(Msg::HintLang)),
+            ("t", app.tr(Msg::HintTheme)),
+            ("?", app.tr(Msg::HintHelp)),
+            ("q", app.tr(Msg::HintQuit)),
+        ]
+    };
+
+    let key_style = Style::default().fg(t().text).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(t().text_dim);
+    let sep_style = Style::default()
+        .fg(t().text_dim)
+        .add_modifier(Modifier::DIM);
+
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 1u16;
+    let max = area.width;
+    for (i, (key, label)) in hints.iter().enumerate() {
+        let chunk = if i == 0 {
+            format!("{key}:{label}")
+        } else {
+            format!("  |  {key}:{label}")
+        };
+        let w = chunk.chars().count() as u16;
+        if used.saturating_add(w) > max {
+            break;
+        }
+        if i > 0 {
+            spans.push(Span::styled("  |  ", sep_style));
+        }
+        spans.push(Span::styled((*key).to_string(), key_style));
+        spans.push(Span::styled(":", label_style));
+        spans.push(Span::styled((*label).to_string(), label_style));
+        used = used.saturating_add(w);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(canvas()), area);
 }
 
 // ── Project list ───────────────────────────────────────────────────────────
@@ -439,12 +504,8 @@ fn draw_project_list(frame: &mut Frame, app: &App, area: Rect) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(t().highlight_bg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("\u{2192} ");
+        .highlight_style(selection_style())
+        .highlight_symbol("\u{203a} ");
 
     frame.render_stateful_widget(list, area, &mut state);
 }
@@ -589,12 +650,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     let block = make_block(&title, focused);
     let logs = app.selected_logs();
 
-    let search_height = if app.search_mode || !app.search_query.is_empty() {
-        1
-    } else {
-        0
-    };
-    let inner_height = area.height.saturating_sub(2 + search_height) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
     let ts_width = 9usize; // "HH:MM:SS "
 
@@ -621,7 +677,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(inner_height)
         .saturating_sub(offset_visual) as u16;
 
-    let mut text: Vec<Line> = logs
+    let text: Vec<Line> = logs
         .iter()
         .map(|entry| {
             let color = log_color(&entry.line, entry.is_stderr);
@@ -633,111 +689,11 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    if app.search_mode {
-        text.push(Line::from(vec![
-            Span::styled("/", Style::default().fg(t().warn)),
-            Span::styled(app.search_query.clone(), Style::default().fg(t().text)),
-            Span::styled("\u{2588}", Style::default().fg(t().warn)),
-        ]));
-    } else if !app.search_query.is_empty() {
-        text.push(Line::from(vec![
-            Span::styled(
-                format!("filter: {} ", app.search_query),
-                Style::default().fg(t().warn),
-            ),
-            Span::styled(
-                "(/ to edit, Esc to clear)",
-                Style::default().fg(t().text_dim),
-            ),
-        ]));
-    }
-
     let paragraph = Paragraph::new(text)
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((scroll_row, 0));
     frame.render_widget(paragraph, area);
-}
-
-// ── Status line (between logs and services) ────────────────────────────────
-
-fn draw_status_line(frame: &mut Frame, app: &App, area: Rect) {
-    let message = app.status_message.as_deref().unwrap_or("");
-    let mut spans = vec![Span::styled(
-        format!(" {} ", message),
-        Style::default().fg(t().warn),
-    )];
-
-    let unmanaged_count = app.unmanaged_services.len();
-    if unmanaged_count > 0 {
-        spans.push(Span::styled(
-            format!(
-                " {} ",
-                app.trf(
-                    Msg::UnmanagedCount,
-                    &[("count", &unmanaged_count.to_string())]
-                )
-            ),
-            Style::default().fg(Color::Black).bg(t().warn),
-        ));
-    }
-
-    let bar = Paragraph::new(Line::from(spans));
-    frame.render_widget(bar, area);
-}
-
-// ── Unmanaged compact ──────────────────────────────────────────────────────
-
-fn draw_unmanaged_compact(frame: &mut Frame, app: &App, area: Rect) {
-    let block = make_block(app.tr(Msg::Unmanaged), false);
-
-    if app.unmanaged_all_services.is_empty() {
-        let p = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                format!("  {}", app.tr(Msg::NonePressU)),
-                Style::default().fg(t().text_dim),
-            )),
-        ])
-        .block(block);
-        frame.render_widget(p, area);
-        return;
-    }
-
-    let visible = area.height.saturating_sub(2) as usize;
-    let rows: Vec<Line> = app
-        .unmanaged_all_services
-        .iter()
-        .take(visible.max(1))
-        .map(|s| {
-            Line::from(vec![
-                Span::styled(format!("{:>5} ", s.port), Style::default().fg(t().accent)),
-                Span::styled(
-                    format!("{:<7} ", s.stack.label()),
-                    Style::default().fg(t().warn),
-                ),
-                Span::styled(truncate(&s.command, 16), Style::default().fg(t().text)),
-            ])
-        })
-        .collect();
-
-    let p = Paragraph::new(rows).block(block).wrap(Wrap { trim: false });
-    frame.render_widget(p, area);
-}
-
-// ── Services strip (horizontal, below logs) ────────────────────────────────
-
-fn draw_service_strip(frame: &mut Frame, app: &App, area: Rect) {
-    let block = make_block(app.tr(Msg::Services), false);
-
-    let mut spans = vec![Span::raw("  ")];
-    spans.extend(service_indicator("caddy", app.caddy_state, app));
-    spans.push(Span::raw("      "));
-    spans.extend(service_indicator("dnsmasq", app.dnsmasq_state, app));
-    let line = Line::from(spans);
-
-    let p = Paragraph::new(line).block(block);
-    frame.render_widget(p, area);
 }
 
 fn service_indicator(name: &str, state: ServiceState, app: &App) -> Vec<Span<'static>> {
@@ -832,10 +788,72 @@ fn draw_detail_popup(frame: &mut Frame, app: &App, project: &Project) {
     ]);
 
     let popup = Paragraph::new(text)
-        .block(make_popup_block(app.tr(Msg::ProjectDetails), t().accent))
+        .block(make_popup_block(app.tr(Msg::ProjectDetails)))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
+}
+
+fn draw_language_picker(frame: &mut Frame, app: &App) {
+    let area = centered_rect(36, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for lang in Language::ALL {
+        let current = if lang == app.lang { " \u{2713}" } else { "" };
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" {:<12}", lang.native_name()),
+                Style::default().fg(t().text),
+            ),
+            Span::styled(
+                format!(" {:<4}", lang.code()),
+                Style::default().fg(t().text_dim),
+            ),
+            Span::styled(current, Style::default().fg(t().ok)),
+        ]);
+        items.push(ListItem::new(line));
+    }
+    let mut state = ListState::default();
+    state.select(Some(app.language_selected));
+
+    let list = List::new(items)
+        .block(make_popup_block(app.tr(Msg::LanguagePicker)))
+        .highlight_style(selection_style())
+        .highlight_symbol("\u{203a} ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_theme_picker(frame: &mut Frame, app: &App) {
+    let area = centered_rect(42, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let current = app.current_theme_id();
+    let mut items: Vec<ListItem> = Vec::new();
+    for theme in &app.theme_choices {
+        let check = if theme.id == current { " \u{2713}" } else { "" };
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" {:<16}", theme.label),
+                Style::default().fg(t().text),
+            ),
+            Span::styled(
+                format!(" {:<12}", theme.id),
+                Style::default().fg(t().text_dim),
+            ),
+            Span::styled(check, Style::default().fg(t().ok)),
+        ]);
+        items.push(ListItem::new(line));
+    }
+
+    let mut state = ListState::default();
+    state.select(Some(app.theme_selected));
+
+    let list = List::new(items)
+        .block(make_popup_block(app.tr(Msg::ThemePicker)))
+        .highlight_style(selection_style())
+        .highlight_symbol("\u{203a} ");
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 // ── Help popup ─────────────────────────────────────────────────────────────
@@ -844,9 +862,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
     let area = centered_rect(55, 70, frame.area());
     frame.render_widget(Clear, area);
 
-    let key_style = Style::default().fg(t().accent).add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(t().text_dim);
     let desc_style = Style::default().fg(t().text);
-    let section_style = Style::default().fg(t().warn).add_modifier(Modifier::BOLD);
+    let section_style = Style::default().fg(t().text);
 
     let entries: Vec<Line> = vec![
         Line::from(""),
@@ -887,6 +905,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         help_line("  R", app.tr(Msg::HelpReloadCaddy), key_style, desc_style),
         help_line("  u", app.tr(Msg::HelpUnmanaged), key_style, desc_style),
         help_line("  l", app.tr(Msg::HelpLanguage), key_style, desc_style),
+        help_line("  t", app.tr(Msg::HelpTheme), key_style, desc_style),
         help_line("  ?", app.tr(Msg::HelpToggle), key_style, desc_style),
         help_line("  q", app.tr(Msg::HelpQuitSoft), key_style, desc_style),
         help_line("  Q", app.tr(Msg::HelpQuitHard), key_style, desc_style),
@@ -898,7 +917,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
     ];
 
     let popup = Paragraph::new(entries)
-        .block(make_popup_block(app.tr(Msg::Keybindings), t().accent))
+        .block(make_popup_block(app.tr(Msg::Keybindings)))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1049,7 +1068,7 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
     )));
 
     let popup = Paragraph::new(lines)
-        .block(make_popup_block(app.tr(Msg::AddProject), t().accent))
+        .block(make_popup_block(app.tr(Msg::AddProject)))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1193,7 +1212,7 @@ fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
     )));
 
     let popup = Paragraph::new(lines)
-        .block(make_popup_block(app.tr(Msg::EditProject), t().accent))
+        .block(make_popup_block(app.tr(Msg::EditProject)))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1219,7 +1238,7 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, action: ConfirmAction) {
     ];
 
     let popup = Paragraph::new(text)
-        .block(make_popup_block(app.tr(Msg::Confirm), t().warn))
+        .block(make_popup_block(app.tr(Msg::Confirm)))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);
@@ -1242,17 +1261,14 @@ fn draw_unmanaged_popup(frame: &mut Frame, app: &App) {
         app.tr(Msg::FilterAllPorts)
     };
 
-    let block = make_popup_block(
-        &format!(
-            "{} [{}|{}] {}/{}",
-            app.tr(Msg::Unmanaged),
-            filter_label,
-            port_label,
-            app.unmanaged_services.len(),
-            app.unmanaged_all_services.len()
-        ),
-        t().warn,
-    );
+    let block = make_popup_block(&format!(
+        "{} [{}|{}] {}/{}",
+        app.tr(Msg::Unmanaged),
+        filter_label,
+        port_label,
+        app.unmanaged_services.len(),
+        app.unmanaged_all_services.len()
+    ));
 
     if app.unmanaged_services.is_empty() {
         let empty = Paragraph::new(vec![
@@ -1296,37 +1312,13 @@ fn draw_unmanaged_popup(frame: &mut Frame, app: &App) {
         items.push(ListItem::new(line));
     }
 
-    let hint_style = Style::default().fg(t().text_dim);
-    let key_bg = Style::default().fg(Color::Black).bg(t().border);
-    items.push(ListItem::new(Line::from("")));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Enter ", key_bg),
-        Span::styled(format!("{}  ", app.tr(Msg::ActionInspect)), hint_style),
-        Span::styled(" i ", key_bg),
-        Span::styled(format!("{}  ", app.tr(Msg::ActionImport)), hint_style),
-        Span::styled(" I ", key_bg),
-        Span::styled(format!("{}  ", app.tr(Msg::ActionIgnore)), hint_style),
-        Span::styled(" f ", key_bg),
-        Span::styled(format!("{}  ", app.tr(Msg::ActionStack)), hint_style),
-        Span::styled(" w ", key_bg),
-        Span::styled(format!("{}  ", app.tr(Msg::ActionPorts)), hint_style),
-        Span::styled(" r ", key_bg),
-        Span::styled(format!("{}  ", app.tr(Msg::ActionRefresh)), hint_style),
-        Span::styled(" Esc ", key_bg),
-        Span::styled(app.tr(Msg::ActionClose), hint_style),
-    ])));
-
     let mut state = ListState::default();
     state.select(Some(app.unmanaged_selected));
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(t().highlight_bg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("\u{2192} ");
+        .highlight_style(selection_style())
+        .highlight_symbol("\u{203a} ");
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -1378,7 +1370,7 @@ fn draw_unmanaged_detail(frame: &mut Frame, app: &App, service: &ServiceInfo) {
     ];
 
     let popup = Paragraph::new(text)
-        .block(make_popup_block(app.tr(Msg::Details), t().warn))
+        .block(make_popup_block(app.tr(Msg::Details)))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);

@@ -25,11 +25,19 @@ pub struct Config {
     pub language: Option<Language>,
 }
 
-/// Optional color overrides for the TUI.
-/// Each field accepts a hex color string like "#64b4dc" or a named color
-/// like "red", "green", "cyan", "white", "darkgray", "lightgreen", etc.
+/// Optional color theme. `name` selects a shipped or user TOML file;
+/// the other fields overlay individual slots.
+///
+/// Each color accepts a hex string (`#64b4dc`), a named ANSI color
+/// (`red`, `green`, `cyan`, `white`, `darkgray`, …), or `reset` to follow
+/// the terminal default.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 pub struct ThemeConfig {
+    /// `groknight` (default), `terminal`, `nightfox`, `catppuccin`,
+    /// `macintosh`, `macintosh-dark`, or a file in `~/.config/zapusk/themes/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub bg: Option<String>,
     pub border: Option<String>,
     pub border_focus: Option<String>,
     pub text: Option<String>,
@@ -39,6 +47,7 @@ pub struct ThemeConfig {
     pub warn: Option<String>,
     pub err: Option<String>,
     pub highlight_bg: Option<String>,
+    pub highlight_fg: Option<String>,
 }
 
 fn default_tld() -> String {

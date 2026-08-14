@@ -1,0 +1,15 @@
+# Follows the terminal's own palette (Color::Reset + 16 ANSI colors).
+# Use this so zapusk matches iTerm / Ghostty / Alacritty / etc. themes.
+id = "terminal"
+label = "Terminal"
+
+bg            = "reset"
+border        = "darkgray"
+border_focus  = "white"
+text          = "reset"
+text_dim      = "darkgray"
+accent        = "magenta"
+ok            = "green"
+warn          = "yellow"
+err           = "red"
+highlight_bg  = "black"

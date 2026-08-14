@@ -1,0 +1,19 @@
+# Example user theme. Copy to ~/.config/zapusk/themes/tokyonight.toml
+# then set in config.toml:
+#
+#   [theme]
+#   name = "tokyonight"
+
+id = "tokyonight"
+label = "Tokyo Night"
+
+bg            = "#1a1b26"
+border        = "#3b4261"
+border_focus  = "#7aa2f7"
+text          = "#c0caf5"
+text_dim      = "#565f89"
+accent        = "#bb9af7"
+ok            = "#9ece6a"
+warn          = "#e0af68"
+err           = "#f7768e"
+highlight_bg  = "#292e42"

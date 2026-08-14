@@ -1,0 +1,14 @@
+# GrokNight — default. Neutral dark base, magenta accent, Tokyo Night status.
+id = "groknight"
+label = "GrokNight"
+
+bg            = "#141414"
+border        = "#414141"
+border_focus  = "#bb9af7"
+text          = "#e1e1e1"
+text_dim      = "#6c6c6c"
+accent        = "#bb9af7"
+ok            = "#9ece6a"
+warn          = "#e0af68"
+err           = "#f7768e"
+highlight_bg  = "#242424"

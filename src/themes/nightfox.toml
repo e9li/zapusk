@@ -1,0 +1,14 @@
+# Nightfox — EdenEast/nightfox.nvim default variant.
+id = "nightfox"
+label = "Nightfox"
+
+bg            = "#192330"
+border        = "#39506d"
+border_focus  = "#9d79d6"
+text          = "#cdcecf"
+text_dim      = "#71839b"
+accent        = "#9d79d6"
+ok            = "#81b29a"
+warn          = "#dbc074"
+err           = "#c94f6d"
+highlight_bg  = "#2b3b51"
