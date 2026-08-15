@@ -5,6 +5,7 @@ pub mod docker;
 pub mod framework;
 pub mod manager;
 pub mod project;
+pub mod ready;
 
 /// Convert a project name to a valid domain-safe slug.
 /// Replaces underscores, spaces, and non-alphanumeric chars with hyphens,

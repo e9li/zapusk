@@ -114,6 +114,20 @@ pub const COMPOSE_FILE_CANDIDATES: &[&str] = &[
     "docker-compose.yaml",
 ];
 
+/// Look up a project by exact `name`. Lists known names on miss.
+pub fn lookup_project<'a>(config: &'a Config, name: &str) -> Result<&'a ProjectConfig> {
+    if let Some(p) = config.projects.iter().find(|p| p.name == name) {
+        return Ok(p);
+    }
+    let known: Vec<&str> = config.projects.iter().map(|p| p.name.as_str()).collect();
+    let list = if known.is_empty() {
+        "(none)".to_string()
+    } else {
+        known.join(", ")
+    };
+    anyhow::bail!("unknown project '{name}'. Known: {list}");
+}
+
 impl ProjectConfig {
     /// Iterator over the primary domain and all aliases.
     pub fn all_hostnames(&self) -> impl Iterator<Item = &str> {

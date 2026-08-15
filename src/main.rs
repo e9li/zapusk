@@ -23,14 +23,14 @@ use tokio::time::{self, MissedTickBehavior};
 use core::config::Config;
 use tui::app::App;
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(name = "zapusk", version, about = "Local dev project manager")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Check system dependencies
     Doctor,
@@ -55,6 +55,41 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Start a project (leaves the process running)
+    Start {
+        /// Project name from config.toml
+        name: String,
+        /// Do not wait for the domain to answer
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Stop a running project
+    Stop {
+        /// Project name from config.toml
+        name: String,
+    },
+    /// Stop then start a project
+    Restart {
+        /// Project name from config.toml
+        name: String,
+        /// Do not wait for the domain to answer
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Show project status
+    #[command(visible_alias = "list")]
+    Status {
+        /// Project name (omit to list all)
+        name: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open a project domain in the browser
+    Open {
+        /// Project name from config.toml
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -68,6 +103,13 @@ async fn main() -> Result<()> {
         Some(Commands::Destroy) => cli::destroy::run().await,
         Some(Commands::Discover { json, import }) => cli::discover::run(json, import).await,
         Some(Commands::Completions { shell }) => cli::completions::run(shell, Cli::command()),
+        Some(Commands::Start { name, no_wait }) => cli::lifecycle::start(&name, no_wait).await,
+        Some(Commands::Stop { name }) => cli::lifecycle::stop(&name).await,
+        Some(Commands::Restart { name, no_wait }) => cli::lifecycle::restart(&name, no_wait).await,
+        Some(Commands::Status { name, json }) => {
+            cli::lifecycle::status(name.as_deref(), json).await
+        }
+        Some(Commands::Open { name }) => cli::lifecycle::open(&name),
         None => run_tui().await,
     }
 }
@@ -177,4 +219,48 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_start_no_wait() {
+        let cli = Cli::try_parse_from(["zapusk", "start", "shop", "--no-wait"]).unwrap();
+        match cli.command {
+            Some(Commands::Start { name, no_wait }) => {
+                assert_eq!(name, "shop");
+                assert!(no_wait);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_status_alias_list_and_json() {
+        let cli = Cli::try_parse_from(["zapusk", "list", "api", "--json"]).unwrap();
+        match cli.command {
+            Some(Commands::Status { name, json }) => {
+                assert_eq!(name.as_deref(), Some("api"));
+                assert!(json);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_stop_and_open() {
+        let stop = Cli::try_parse_from(["zapusk", "stop", "blog"]).unwrap();
+        match stop.command {
+            Some(Commands::Stop { name }) => assert_eq!(name, "blog"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let open = Cli::try_parse_from(["zapusk", "open", "blog"]).unwrap();
+        match open.command {
+            Some(Commands::Open { name }) => assert_eq!(name, "blog"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

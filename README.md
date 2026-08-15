@@ -207,11 +207,21 @@ zapusk              # open TUI
 zapusk init         # interactive first-run setup
 zapusk doctor       # check all dependencies
 zapusk add          # add a project to config interactively
+zapusk start NAME   # start a project (same manager as the TUI)
+zapusk stop NAME
+zapusk restart NAME
+zapusk status       # list all (alias: list); status NAME for one
+zapusk open NAME    # open http(s)://domain in the browser
 zapusk destroy      # remove all zapusk configuration
 zapusk discover     # discover listening services (managed + unmanaged)
 zapusk discover --import 4000  # import discovered service by port/pid
 zapusk completions zsh   # print a completion script (also bash/fish/elvish/powershell)
 ```
+
+`start` / `restart` rewrite the Caddyfile when `[caddy]` is set, then wait
+until the domain answers (`--no-wait` skips that). `start` on an already
+running project exits 0. Processes keep running after the command exits
+(same pidfiles as the TUI). `status --json` is for scripts.
 
 ---
 
@@ -695,7 +705,6 @@ Pull requests are not accepted. The GitHub repo is for issues and browsing;
 the canonical source is <https://git.e9li.com/e9li/zapusk>. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## TODO / Ideas
+## Roadmap
 
-### Distribution
-- [ ] Homebrew formula — plan in [docs/homebrew.md](docs/homebrew.md)
+See [ROADMAP.md](ROADMAP.md). Homebrew plan: [docs/homebrew.md](docs/homebrew.md).

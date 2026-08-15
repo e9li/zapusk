@@ -78,6 +78,13 @@ impl Manager {
         self.spawned.contains_key(name) || self.adopted.contains_key(name)
     }
 
+    pub fn tracked_pid(&self, name: &str) -> Option<u32> {
+        self.spawned
+            .get(name)
+            .or_else(|| self.adopted.get(name))
+            .map(|t| t.pid)
+    }
+
     /// Drop tracking for a project without signaling the process.
     /// Used when the project disappears from config while the TUI is open.
     pub fn forget(&mut self, name: &str) {
@@ -428,6 +435,31 @@ impl Manager {
     /// Check if a project's port is already in use and adopt the process if so.
     /// Checks pidfiles first (previously managed by zapusk), then falls back to lsof.
     /// Returns Some(pid) if adopted, None if port is free.
+    /// Read-only: is this project up? Does not adopt or start log tails.
+    pub async fn probe_running(
+        config: &ProjectConfig,
+        frameworks: &FrameworkRegistry,
+    ) -> Option<u32> {
+        if let Some(pid) = read_pid(&config.name) {
+            if process_exists(pid) {
+                return Some(pid);
+            }
+        }
+
+        if frameworks.is_compose(&config.project_type) {
+            if docker::ps_running(config).await {
+                return read_pid(&config.name).or(Some(0));
+            }
+            return None;
+        }
+
+        if TcpListener::bind(("127.0.0.1", config.port)).is_ok() {
+            return None;
+        }
+
+        find_port_pid(config.port).await
+    }
+
     pub async fn detect_running(&mut self, config: &ProjectConfig) -> Option<u32> {
         // Check pidfile first — process was previously managed by zapusk
         if let Some(pid) = read_pid(&config.name) {
