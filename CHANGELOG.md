@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `zapusk doctor` no longer requires a PHP-FPM socket. Kirby and Symfony use
+  `php -S` / `symfony server:start`, so a missing `phpX.Y-fpm.sock` is not a
+  local-dev problem.
 - Default TUI chrome matches Grok Build: **GrokNight** palette on a padded
   `#141414` canvas, faint square frames, `›` selection, a quiet header
   (`zapusk  |  3 projects  |  …`), a boxed `>` prompt (status or selected
