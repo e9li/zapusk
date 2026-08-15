@@ -1118,7 +1118,8 @@ impl App {
                         .map(|s| s.lifecycle.ready_attempts)
                         .unwrap_or(8);
                     tokio::spawn(async move {
-                        let result = verify_project_domain_static(&config, attempts).await;
+                        let result =
+                            crate::core::ready::verify_project_domain(&config, attempts).await;
                         let _ = tx
                             .send(BackgroundEvent::DomainVerificationDone {
                                 project_name: name,
@@ -2263,64 +2264,6 @@ fn proxy_relevant_changed(old: &ProjectConfig, new: &ProjectConfig) -> bool {
         || old.aliases != new.aliases
         || old.tls != new.tls
         || old.upstream_host != new.upstream_host
-}
-
-async fn verify_project_domain_static(
-    config: &ProjectConfig,
-    ready_attempts: u32,
-) -> Result<u16, String> {
-    let scheme = if config.tls { "https" } else { "http" };
-    let url = format!("{}://{}", scheme, config.domain);
-    let mut last_error = String::from("unreachable");
-
-    // Compose stacks take longer to come up (image pulls, db init) than
-    // native processes — give them a much wider verification window.
-    let attempts = ready_attempts;
-
-    for _ in 0..attempts {
-        let mut cmd = Command::new("curl");
-        cmd.arg("-sS")
-            .arg("-o")
-            .arg("/dev/null")
-            .arg("-w")
-            .arg("%{http_code}")
-            .arg("--max-time")
-            .arg("2");
-
-        if config.tls {
-            cmd.arg("-k");
-        }
-
-        let output = timeout(Duration::from_secs(3), cmd.arg(&url).output()).await;
-
-        match output {
-            Ok(Ok(out)) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if let Ok(code) = text.parse::<u16>() {
-                    if code > 0 {
-                        return Ok(code);
-                    }
-                }
-                last_error = format!("unexpected curl output: {}", text);
-            }
-            Ok(Ok(out)) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                if !stderr.is_empty() {
-                    last_error = stderr;
-                }
-            }
-            Ok(Err(e)) => {
-                last_error = e.to_string();
-            }
-            Err(_) => {
-                last_error = "curl timed out".into();
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    Err(last_error)
 }
 
 fn app_diag_log(message: &str) {

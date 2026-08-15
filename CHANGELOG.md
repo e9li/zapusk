@@ -5,6 +5,15 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.18]
+
+### Added
+
+- Headless lifecycle CLI (same manager / pidfiles as the TUI):
+  `zapusk start|stop|restart <name>`, `zapusk status` (`list` alias,
+  `--json`), `zapusk open <name>`. `start` reloads Caddy and waits for the
+  domain unless `--no-wait`.
+
 ## [0.1.17]
 
 ### Added
