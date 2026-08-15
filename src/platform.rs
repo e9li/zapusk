@@ -89,12 +89,3 @@ pub fn php_install_path(version: &str) -> String {
         format!("/usr/bin/php{}", version)
     }
 }
-
-/// PHP-FPM socket path for a specific version (used in doctor checks).
-pub fn php_fpm_socket_path(version: &str) -> String {
-    if cfg!(target_os = "macos") {
-        format!("/opt/homebrew/var/run/php/php{}-fpm.sock", version)
-    } else {
-        format!("/run/php/php{}-fpm.sock", version)
-    }
-}
