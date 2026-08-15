@@ -117,17 +117,7 @@ pub async fn status(name: Option<&str>, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<16} {:<10} {:<8} {:<12} {:<6} {}",
-        "NAME", "STATUS", "PID", "TYPE", "PORT", "DOMAIN"
-    );
-    for row in rows {
-        let pid = row.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        println!(
-            "{:<16} {:<10} {:<8} {:<12} {:<6} {}",
-            row.name, row.status, pid, row.project_type, row.port, row.domain
-        );
-    }
+    print!("{}", format_status_table(&rows));
     Ok(())
 }
 
@@ -138,6 +128,41 @@ pub fn open(name: &str) -> Result<()> {
     platform::open_url(&url)?;
     println!("opened {url}");
     Ok(())
+}
+
+fn format_status_table(rows: &[StatusRow]) -> String {
+    let pids: Vec<String> = rows
+        .iter()
+        .map(|r| r.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()))
+        .collect();
+    let ports: Vec<String> = rows.iter().map(|r| r.port.to_string()).collect();
+
+    let name_w = col_width("NAME", rows.iter().map(|r| r.name.as_str()));
+    let status_w = col_width("STATUS", rows.iter().map(|r| r.status.as_str()));
+    let pid_w = col_width("PID", pids.iter().map(|s| s.as_str()));
+    let type_w = col_width("TYPE", rows.iter().map(|r| r.project_type.as_str()));
+    let port_w = col_width("PORT", ports.iter().map(|s| s.as_str()));
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<name_w$}  {:<status_w$}  {:>pid_w$}  {:<type_w$}  {:>port_w$}  {}\n",
+        "NAME", "STATUS", "PID", "TYPE", "PORT", "DOMAIN"
+    ));
+    for (i, row) in rows.iter().enumerate() {
+        out.push_str(&format!(
+            "{:<name_w$}  {:<status_w$}  {:>pid_w$}  {:<type_w$}  {:>port_w$}  {}\n",
+            row.name, row.status, pids[i], row.project_type, ports[i], row.domain
+        ));
+    }
+    out
+}
+
+fn col_width<'a>(header: &str, values: impl Iterator<Item = &'a str>) -> usize {
+    values
+        .map(|s| s.chars().count())
+        .chain(std::iter::once(header.chars().count()))
+        .max()
+        .unwrap_or(header.chars().count())
 }
 
 #[derive(serde::Serialize)]
@@ -239,5 +264,36 @@ mod tests {
     fn lookup_empty_config() {
         let err = lookup_project(&cfg(vec![]), "x").unwrap_err().to_string();
         assert!(err.contains("(none)"));
+    }
+
+    #[test]
+    fn status_table_aligns_long_names() {
+        let table = super::format_status_table(&[
+            super::StatusRow {
+                name: "kkrr-reservationen".into(),
+                status: "stopped".into(),
+                pid: None,
+                project_type: "symfony".into(),
+                port: 8160,
+                domain: "reservationen.kkrr.test".into(),
+                tls: false,
+            },
+            super::StatusRow {
+                name: "hech".into(),
+                status: "running".into(),
+                pid: Some(54223),
+                project_type: "kirby".into(),
+                port: 8220,
+                domain: "hech.test".into(),
+                tls: false,
+            },
+        ]);
+        let lines: Vec<&str> = table.lines().collect();
+        let type_at = lines[0].find("TYPE").expect("TYPE");
+        let domain_at = lines[0].find("DOMAIN").expect("DOMAIN");
+        assert!(lines[1][type_at..].starts_with("symfony"));
+        assert!(lines[2][type_at..].starts_with("kirby  "));
+        assert!(lines[1][domain_at..].starts_with("reservationen.kkrr.test"));
+        assert!(lines[2][domain_at..].starts_with("hech.test"));
     }
 }
