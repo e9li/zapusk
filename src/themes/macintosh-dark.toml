@@ -1,16 +1,15 @@
-# Macintosh 1984 Dark — inverted phosphor: black CRT, warm white type,
-# same vintage Apple 16-color status.
+# Macintosh 1984 Dark — aged beige plastic in low light, same 16-color status.
 id = "macintosh-dark"
 label = "Macintosh 1984 Dark"
 
-bg            = "#1a1a1a"
-border        = "#e8e4d4"
-border_focus  = "#e8e4d4"
-text          = "#e8e4d4"
-text_dim      = "#888888"
+bg            = "#2c261c"
+border        = "#c9b896"
+border_focus  = "#c9b896"
+text          = "#d8ccb4"
+text_dim      = "#8a7a62"
 accent        = "#6666ff"
 ok            = "#1fb714"
 warn          = "#fbf305"
 err           = "#dd0907"
-highlight_bg  = "#e8e4d4"
-highlight_fg  = "#000000"
+highlight_bg  = "#d8ccb4"
+highlight_fg  = "#2c261c"
