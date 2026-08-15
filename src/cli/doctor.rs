@@ -501,20 +501,6 @@ pub async fn check_php(version: &str) -> Vec<CheckResult> {
         ));
     }
 
-    // Check FPM socket
-    let fpm_sock = platform::php_fpm_socket_path(version);
-    if Path::new(&fpm_sock).exists() {
-        results.push(CheckResult::pass(format!(
-            "php{}-fpm socket exists",
-            version
-        )));
-    } else {
-        results.push(CheckResult::fail(
-            format!("php{}-fpm socket not found", version),
-            format!("run: brew services start php@{}", version),
-        ));
-    }
-
     results
 }
 
