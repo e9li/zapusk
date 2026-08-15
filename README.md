@@ -678,6 +678,23 @@ zapusk completions fish > ~/.config/fish/completions/zapusk.fish
 
 `zapusk completions` also accepts `elvish` and `powershell`.
 
+## License
+
+Created and maintained by **Rafael Egli**. Copyright (c) 2026 **e9li GmbH**,
+Switzerland. Released under the [MIT License](LICENSE.md) (stated 2026-08-15):
+use it freely; it comes **as is**, without warranty. Rafael Egli and e9li GmbH
+are not responsible for problems caused by using this software. Tagged
+releases keep the license file they shipped with.
+
+## Contributing
+
+Please **open an issue** on the GitHub mirror:
+<https://github.com/e9li/zapusk/issues>.
+
+Pull requests are not accepted. The GitHub repo is for issues and browsing;
+the canonical source is <https://git.e9li.com/e9li/zapusk>. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## TODO / Ideas
 
 ### Distribution

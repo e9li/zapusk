@@ -2,6 +2,10 @@
 name = "zapusk"
 version = "0.1.17"
 edition = "2024"
+license = "MIT"
+authors = ["Rafael Egli"]
+repository = "https://github.com/e9li/zapusk"
+homepage = "https://git.e9li.com/e9li/zapusk"
 
 [[bin]]
 name = "zapusk"
