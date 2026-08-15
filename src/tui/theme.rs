@@ -412,16 +412,16 @@ mod tests {
     #[test]
     fn macintosh_light_and_dark_invert_selection() {
         let light = parse_builtin("macintosh");
-        assert_eq!(light.bg, Color::Rgb(0xe8, 0xe4, 0xd4));
-        assert_eq!(light.text, Color::Rgb(0, 0, 0));
-        assert_eq!(light.highlight_bg, Color::Rgb(0, 0, 0));
-        assert_eq!(light.highlight_fg, Color::Rgb(0xe8, 0xe4, 0xd4));
+        assert_eq!(light.bg, Color::Rgb(0xc9, 0xb8, 0x96));
+        assert_eq!(light.text, Color::Rgb(0x2a, 0x24, 0x1c));
+        assert_eq!(light.highlight_bg, Color::Rgb(0x2a, 0x24, 0x1c));
+        assert_eq!(light.highlight_fg, Color::Rgb(0xc9, 0xb8, 0x96));
 
         let dark = parse_builtin("macintosh-dark");
-        assert_eq!(dark.bg, Color::Rgb(0x1a, 0x1a, 0x1a));
-        assert_eq!(dark.text, Color::Rgb(0xe8, 0xe4, 0xd4));
-        assert_eq!(dark.highlight_bg, Color::Rgb(0xe8, 0xe4, 0xd4));
-        assert_eq!(dark.highlight_fg, Color::Rgb(0, 0, 0));
+        assert_eq!(dark.bg, Color::Rgb(0x2c, 0x26, 0x1c));
+        assert_eq!(dark.text, Color::Rgb(0xd8, 0xcc, 0xb4));
+        assert_eq!(dark.highlight_bg, Color::Rgb(0xd8, 0xcc, 0xb4));
+        assert_eq!(dark.highlight_fg, Color::Rgb(0x2c, 0x26, 0x1c));
 
         assert_eq!(canonical_theme_id("mac1984"), "macintosh");
         assert_eq!(canonical_theme_id("macintosh-1984-dark"), "macintosh-dark");

@@ -97,6 +97,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+fn centered_size(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn origin_badge(origin: Option<&ProcessOrigin>) -> Span<'static> {
     match origin {
         Some(ProcessOrigin::Managed) => Span::styled(" [M]", Style::default().fg(t().ok)),
@@ -114,6 +125,19 @@ fn truncate(s: &str, max: usize) -> String {
         out.push(c);
     }
     out.push('\u{2026}');
+    out
+}
+
+fn fit_width(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let n = s.chars().count();
+    if n > width {
+        return truncate(s, width);
+    }
+    let mut out = s.to_string();
+    out.extend(std::iter::repeat(' ').take(width - n));
     out
 }
 
@@ -829,20 +853,40 @@ fn draw_language_picker(frame: &mut Frame, app: &App) {
 }
 
 fn draw_theme_picker(frame: &mut Frame, app: &App) {
-    let area = centered_rect(42, 50, frame.area());
+    let current = app.current_theme_id();
+    let id_w = app
+        .theme_choices
+        .iter()
+        .map(|th| th.id.chars().count())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    let label_w = app
+        .theme_choices
+        .iter()
+        .map(|th| th.label.chars().count())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    // borders + › + spaces + id + check
+    let width = (2 + 2 + 1 + label_w + 1 + id_w + 2) as u16;
+    let height = (2 + app.theme_choices.len() + 1) as u16;
+    let area = centered_size(width, height.max(8), frame.area());
+    let label_w = (area.width as usize)
+        .saturating_sub(2 + 2 + 1 + 1 + id_w + 2)
+        .max(8);
     frame.render_widget(Clear, area);
 
-    let current = app.current_theme_id();
     let mut items: Vec<ListItem> = Vec::new();
     for theme in &app.theme_choices {
         let check = if theme.id == current { " \u{2713}" } else { "" };
         let line = Line::from(vec![
             Span::styled(
-                format!(" {:<16}", theme.label),
+                format!(" {}", fit_width(&theme.label, label_w)),
                 Style::default().fg(t().text),
             ),
             Span::styled(
-                format!(" {:<12}", theme.id),
+                format!(" {}", fit_width(&theme.id, id_w)),
                 Style::default().fg(t().text_dim),
             ),
             Span::styled(check, Style::default().fg(t().ok)),

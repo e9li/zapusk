@@ -1,16 +1,16 @@
-# Macintosh 1984 — light. Warm P4 phosphor paper, 1-bit chrome,
+# Macintosh 1984 — light. Classic ABS computer beige, 1-bit chrome,
 # Apple 16-color accents (Mac II, 1987) for status.
 id = "macintosh"
 label = "Macintosh 1984"
 
-bg            = "#e8e4d4"
-border        = "#000000"
-border_focus  = "#000000"
-text          = "#000000"
-text_dim      = "#555555"
+bg            = "#c9b896"
+border        = "#2a241c"
+border_focus  = "#2a241c"
+text          = "#2a241c"
+text_dim      = "#6b5d4a"
 accent        = "#0000d3"
 ok            = "#1fb714"
 warn          = "#a05a00"
 err           = "#dd0907"
-highlight_bg  = "#000000"
-highlight_fg  = "#e8e4d4"
+highlight_bg  = "#2a241c"
+highlight_fg  = "#c9b896"
