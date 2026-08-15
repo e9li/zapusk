@@ -476,7 +476,7 @@ block_paths = ["/.*"]    # static_plus_proxy only
 [hooks]
 sync_php_version = false     # write/delete .php-version from php_version
 resolve_php_binary = false   # resolve {php} via Homebrew php@X.Y
-require_php = false          # doctor checks php@version + FPM
+require_php = false          # doctor checks php@version is installed
 
 [discovery]
 command_contains = ["puma"]
@@ -594,8 +594,8 @@ Shipped palettes:
 | **terminal** | Uses the terminal's own background/foreground and 16 ANSI colors, so zapusk follows iTerm, Ghostty, Alacritty, … |
 | **nightfox** | EdenEast Nightfox — deep blue-gray canvas, purple accent. |
 | **catppuccin** | Catppuccin Mocha — pastel mauve accent on a warm dark base. |
-| **macintosh** | Macintosh 1984 light — warm phosphor paper, 1-bit black chrome, Apple 16-color status. |
-| **macintosh-dark** | Same vintage palette inverted: black CRT, warm white type. |
+| **macintosh** | Macintosh 1984 light — classic computer beige, 1-bit chrome, Apple 16-color status. |
+| **macintosh-dark** | Same beige in low light: dark brown chassis, warm ivory type. |
 
 ```toml
 [theme]
@@ -698,4 +698,4 @@ the canonical source is <https://git.e9li.com/e9li/zapusk>. See
 ## TODO / Ideas
 
 ### Distribution
-- [ ] Homebrew formula
+- [ ] Homebrew formula — plan in [docs/homebrew.md](docs/homebrew.md)
