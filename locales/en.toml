@@ -1,6 +1,6 @@
 # zapusk UI strings — English (source language)
 # Keys must stay in sync across locales/*.toml.
-# Placeholders stay in the translation: {name} {port} {lang} {error} {code} {count} {path} {host} {field} {domain} {pid} {command} {reason} {notes}
+# Placeholders stay in the translation: {name} {port} {lang} {error} {code} {count} {path} {host} {field} {domain} {pid} {command} {reason} {notes} {tld}
 
 projects = "Projects"
 details = "Details"
@@ -145,6 +145,7 @@ project_exists = "Project '{name}' already exists"
 port_in_use = "Port {port} is already used by another project"
 duplicate_host = "Duplicate hostname '{host}'"
 domain_used = "Domain '{host}' is already used by '{name}'"
+domain_tld = "Domain '{host}' must end with .{tld} — DNS only resolves *.{tld}"
 no_project = "No project selected"
 project_gone = "Project no longer exists"
 stop_before_edit = "Stop {name} before editing"

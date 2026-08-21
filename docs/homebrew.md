@@ -11,7 +11,7 @@ packaging lives in a separate tap (`e9li/homebrew-tap` on GitHub).
 ## Status
 
 - [x] MIT license ([LICENSE.md](../LICENSE.md))
-- [ ] Tag a release that matches `Cargo.toml` (currently `0.1.18`; existing
+- [ ] Tag a release that matches `Cargo.toml` (currently `0.1.19`; existing
       tags are only `v0.1.0` / `v0.1.1` / `v0.1.8`)
 - [ ] Public tarball URL for that tag
 - [ ] Create `e9li/homebrew-tap`
@@ -27,7 +27,7 @@ packaging lives in a separate tap (`e9li/homebrew-tap` on GitHub).
 ## Before the formula
 
 1. **Tag a real release** on the canonical repo and the GitHub mirror,
-   matching `Cargo.toml` (e.g. `v0.1.18`).
+   matching `Cargo.toml` (e.g. `v0.1.19`).
 
    - Canonical: <https://git.e9li.com/e9li/zapusk>
    - Mirror (issues): <https://github.com/e9li/zapusk>
@@ -36,7 +36,7 @@ packaging lives in a separate tap (`e9li/homebrew-tap` on GitHub).
    Prefer the GitHub archive:
 
    ```
-   https://github.com/e9li/zapusk/archive/refs/tags/v0.1.18.tar.gz
+   https://github.com/e9li/zapusk/archive/refs/tags/v0.1.19.tar.gz
    ```
 
    `git.e9li.com` only works if that archive URL is public without auth.
@@ -70,7 +70,7 @@ After the tag exists:
 
 ```bash
 brew create --rust \
-  https://github.com/e9li/zapusk/archive/refs/tags/v0.1.18.tar.gz \
+  https://github.com/e9li/zapusk/archive/refs/tags/v0.1.19.tar.gz \
   --tap e9li/homebrew-tap \
   --set-name zapusk
 ```
@@ -81,7 +81,7 @@ That opens `Formula/zapusk.rb`. Target shape:
 class Zapusk < Formula
   desc "TUI for managing local web development projects"
   homepage "https://git.e9li.com/e9li/zapusk"
-  url "https://github.com/e9li/zapusk/archive/refs/tags/v0.1.18.tar.gz"
+  url "https://github.com/e9li/zapusk/archive/refs/tags/v0.1.19.tar.gz"
   sha256 "PASTE_SHA256"
   license "MIT"
   head "https://git.e9li.com/e9li/zapusk.git", branch: "main"
@@ -102,7 +102,7 @@ end
 SHA of the tarball:
 
 ```bash
-curl -fsSL https://github.com/e9li/zapusk/archive/refs/tags/v0.1.18.tar.gz | shasum -a 256
+curl -fsSL https://github.com/e9li/zapusk/archive/refs/tags/v0.1.19.tar.gz | shasum -a 256
 ```
 
 ---
