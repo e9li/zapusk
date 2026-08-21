@@ -5,6 +5,15 @@ All notable changes to zapusk are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Project domains and aliases must now end with the configured `tld` —
+  in the TUI add/edit forms and in `zapusk add`. Previously any hostname
+  was accepted, but dnsmasq only resolves `*.{tld}`, so off-TLD domains
+  could never answer.
+
 ## [0.1.18]
 
 ### Added

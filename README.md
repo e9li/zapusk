@@ -509,6 +509,8 @@ cp frameworks.example/express.toml ~/.config/zapusk/frameworks/
 # ~/.config/zapusk/config.toml
 
 # tld = "test"            # optional: TLD for wildcard DNS (default: "test")
+                          # domains and aliases must end with this TLD —
+                          # dnsmasq only resolves *.{tld}
 
 [[projects]]
 name = "myshop"

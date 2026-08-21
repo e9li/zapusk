@@ -11,20 +11,6 @@ start/stop/adopt, TOML recipes. The next gains are operations, not more chrome.
 
 ## Do next
 
-### CLI without the TUI
-
-Done. Plan: [docs/cli-headless.md](docs/cli-headless.md).
-
-Headless commands that use the same manager as the TUI:
-
-- `zapusk start <name>`
-- `zapusk stop <name>`
-- `zapusk restart <name>`
-- `zapusk status` / `zapusk list`
-- `zapusk open <name>`
-
-For scripts, Raycast, `cd project && zapusk start`. The TUI remains the main UI.
-
 ### Filter the project list
 
 Typeahead or `/`-style filter on name, type, and domain. Running/stopped

@@ -1354,6 +1354,10 @@ impl App {
         let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
             .chain(aliases.iter().map(String::as_str))
             .collect();
+        if let Some(err) = self.tld_mismatch(&hosts) {
+            self.status_message = Some(err);
+            return;
+        }
         if let Some(err) = self.hostname_conflict(&hosts, None) {
             self.status_message = Some(err);
             return;
@@ -1398,6 +1402,21 @@ impl App {
         self.status_message = Some(self.trf(Msg::Added, &[("name", &form.name)]));
     }
 
+    /// First hostname (primary domain or alias) that doesn't end with the
+    /// configured TLD — dnsmasq only resolves `*.{tld}`, so anything else
+    /// would never answer.
+    fn tld_mismatch(&self, hosts: &[&str]) -> Option<String> {
+        hosts
+            .iter()
+            .find(|h| !crate::core::config::hostname_matches_tld(h, &self.config.tld))
+            .map(|h| {
+                self.trf(
+                    Msg::DomainTld,
+                    &[("host", h), ("tld", self.config.tld.as_str())],
+                )
+            })
+    }
+
     /// Check that the given hostnames don't collide with other projects or
     /// with each other. `exclude_index`, when set, skips that project (for edits).
     fn hostname_conflict(&self, hosts: &[&str], exclude_index: Option<usize>) -> Option<String> {
@@ -1439,6 +1458,9 @@ impl App {
         let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
             .chain(aliases.iter().map(String::as_str))
             .collect();
+        if let Some(err) = self.tld_mismatch(&hosts) {
+            return Some(err);
+        }
         if let Some(err) = self.hostname_conflict(&hosts, None) {
             return Some(err);
         }
@@ -1545,6 +1567,10 @@ impl App {
         let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
             .chain(aliases.iter().map(String::as_str))
             .collect();
+        if let Some(err) = self.tld_mismatch(&hosts) {
+            self.status_message = Some(err);
+            return;
+        }
         if let Some(err) = self.hostname_conflict(&hosts, Some(form.project_index)) {
             self.status_message = Some(err);
             return;
@@ -1618,6 +1644,9 @@ impl App {
         let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
             .chain(aliases.iter().map(String::as_str))
             .collect();
+        if let Some(err) = self.tld_mismatch(&hosts) {
+            return Some(err);
+        }
         if let Some(err) = self.hostname_conflict(&hosts, Some(form.project_index)) {
             return Some(err);
         }
@@ -2549,5 +2578,52 @@ mod tests {
         let c = hash_config_bytes(b"world");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    fn valid_add_form() -> AddForm {
+        let mut form = AddForm::new(vec!["phoenix".to_string()]);
+        form.name = "foo".into();
+        form.domain = "foo.test".into();
+        form.port = "3000".into();
+        form.path = "/tmp".into();
+        form
+    }
+
+    #[test]
+    fn add_form_rejects_domain_outside_tld() {
+        let app = app_with(vec![]);
+        let mut form = valid_add_form();
+        form.domain = "foo.local".into();
+        let err = app.add_form_error(&form).expect("should reject");
+        assert!(err.contains("foo.local"), "unexpected: {err}");
+        assert!(err.contains(".test"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn add_form_rejects_alias_outside_tld() {
+        let app = app_with(vec![]);
+        let mut form = valid_add_form();
+        form.aliases = "bar.test, bar.local".into();
+        let err = app.add_form_error(&form).expect("should reject");
+        assert!(err.contains("bar.local"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn add_form_accepts_domain_in_tld() {
+        let app = app_with(vec![]);
+        assert_eq!(app.add_form_error(&valid_add_form()), None);
+    }
+
+    #[test]
+    fn edit_form_rejects_domain_outside_tld() {
+        let app = app_with(vec![project("foo", 3000, "phoenix")]);
+        let mut form = EditForm::from_project(
+            0,
+            &project("foo", 3000, "phoenix"),
+            vec!["phoenix".to_string()],
+        );
+        form.domain = "foo.local".into();
+        let err = app.edit_form_error(&form).expect("should reject");
+        assert!(err.contains("foo.local"), "unexpected: {err}");
     }
 }

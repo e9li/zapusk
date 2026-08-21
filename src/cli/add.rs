@@ -20,6 +20,13 @@ pub async fn run() -> Result<()> {
     let domain = prompt_with_default("Domain", &default_domain)?;
     let aliases_raw = prompt_with_default("Additional domains (comma-separated)", "")?;
     let aliases = parse_aliases(&aliases_raw);
+    for host in std::iter::once(domain.as_str()).chain(aliases.iter().map(String::as_str)) {
+        if !crate::core::config::hostname_matches_tld(host, &tld) {
+            anyhow::bail!(
+                "Domain '{host}' must end with .{tld} — DNS is only configured for *.{tld} (change TLD with `zapusk init`)"
+            );
+        }
+    }
     let port: u16 = prompt("Port")?
         .parse()
         .context("Port must be a number 1-65535")?;

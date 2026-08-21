@@ -287,6 +287,16 @@ pub fn is_valid_tld(tld: &str) -> bool {
         && !tld.ends_with('-')
 }
 
+/// Check that a hostname belongs to the configured TLD, e.g. `myapp.test`
+/// for TLD `test`. Case-insensitive; requires at least one label before
+/// the TLD, so a bare `test` is rejected. dnsmasq is only configured for
+/// `*.{tld}`, so anything else would never resolve.
+pub fn hostname_matches_tld(host: &str, tld: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let suffix = format!(".{}", tld.to_ascii_lowercase());
+    host.len() > suffix.len() && host.ends_with(&suffix)
+}
+
 pub fn hash_config_bytes(bytes: &[u8]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -447,5 +457,21 @@ mod tests {
         assert!(ensure_php_version_file(&project).is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hostname_matches_tld_requires_tld_suffix() {
+        assert!(hostname_matches_tld("myapp.test", "test"));
+        assert!(hostname_matches_tld("MyApp.TEST", "test"));
+        assert!(hostname_matches_tld("a.b.test", "test"));
+        assert!(hostname_matches_tld(" myapp.test ", "test"));
+
+        assert!(!hostname_matches_tld("myapp.local", "test"));
+        assert!(!hostname_matches_tld("myapp.test", "local"));
+        // bare TLD has no label in front
+        assert!(!hostname_matches_tld("test", "test"));
+        // suffix must start at a label boundary
+        assert!(!hostname_matches_tld("myapptest", "test"));
+        assert!(!hostname_matches_tld("", "test"));
     }
 }
