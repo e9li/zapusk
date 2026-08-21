@@ -240,6 +240,18 @@ brew tap e9li/tap
 brew install zapusk
 ```
 
+### Cargo (crates.io)
+
+```bash
+cargo install zapusk --locked
+```
+
+### Precompiled binaries
+
+Download the archive for your platform (macOS ARM/Intel, Linux ARM/x86_64) from the
+[GitHub Releases](https://github.com/e9li/zapusk/releases/latest) page and place
+`zapusk` in your `PATH`.
+
 Shell completions are installed automatically.
 
 ### Build and install locally (release)

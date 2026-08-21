@@ -53,6 +53,26 @@ jobs:
           name: pkg-${{ matrix.target }}
           path: "*.tar.gz*"
 
+  publish-crates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io (skips if version already published)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          if curl -sf "https://crates.io/api/v1/crates/zapusk/$version" > /dev/null; then
+            echo "zapusk $version already on crates.io, skipping"
+          else
+            cargo publish
+          fi
+
   release:
     needs: build
     runs-on: ubuntu-latest
