@@ -225,7 +225,24 @@ running project exits 0. Processes keep running after the command exits
 
 ---
 
-## Build and install locally (release)
+## Install
+
+### Homebrew (macOS + Linux)
+
+```bash
+brew install e9li/tap/zapusk
+```
+
+Or tap once, then use the short name:
+
+```bash
+brew tap e9li/tap
+brew install zapusk
+```
+
+Shell completions are installed automatically.
+
+### Build and install locally (release)
 
 Recommended local release workflow:
 
