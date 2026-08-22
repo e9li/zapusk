@@ -203,10 +203,12 @@ src/
 
 ## CLI subcommands
 
-`zapusk` is invoked without arguments to open the TUI. It also supports subcommands:
+`zapusk` is invoked without arguments to open the TUI. With no config it prints
+what to run (`zapusk init`, `zapusk add`) and exits. It also supports
+subcommands:
 
 ```
-zapusk              # open TUI
+zapusk              # open TUI (if no config: print init/add and exit)
 zapusk init         # interactive first-run setup
 zapusk doctor       # check all dependencies
 zapusk add          # add a project to config interactively

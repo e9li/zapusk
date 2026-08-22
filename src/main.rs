@@ -20,7 +20,7 @@ use std::io;
 use std::time::Duration;
 use tokio::time::{self, MissedTickBehavior};
 
-use core::config::Config;
+use core::config::{Config, config_path};
 use tui::app::App;
 
 #[derive(Debug, Parser)]
@@ -135,18 +135,23 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui() -> Result<()> {
+    let path = config_path();
+    if !path.exists() {
+        eprintln!("No config at {}.", path.display());
+        eprintln!();
+        eprintln!("Get started:");
+        eprintln!("  zapusk init          Set up dnsmasq + Caddy");
+        eprintln!("  zapusk add           Add your first project");
+        eprintln!();
+        eprintln!("Then run `zapusk` to open the TUI.");
+        std::process::exit(1);
+    }
+
     let config = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
-            let path = core::config::config_path();
             eprintln!("Could not load config at {}: {}\n", path.display(), e);
-            eprintln!("Get started:");
-            eprintln!("  zapusk init          Set up dnsmasq + Caddy");
-            eprintln!("  zapusk add           Add your first project");
-            eprintln!(
-                "\nOr create {} manually — see config.example.toml for the format.",
-                path.display()
-            );
+            eprintln!("Fix the TOML, or create one based on config.example.toml.");
             std::process::exit(1);
         }
     };

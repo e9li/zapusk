@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Changed
+
+- Bare `zapusk` with no `config.toml` prints what to run (`zapusk init`,
+  `zapusk add`) and exits. It does not open an empty TUI or start the init
+  wizard. A broken existing file still prints the parse error.
+
 ## [0.2.0]
 
 ### Added
