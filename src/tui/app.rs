@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -11,12 +11,12 @@ use tokio::time::timeout;
 
 use crate::core::caddy;
 use crate::core::config::{
-    Config, IgnoredService, ProjectConfig, ThemeConfig, config_path, hash_config_bytes,
-    parse_aliases,
+    Config, IgnoredService, ProjectConfig, RestartPolicy, ThemeConfig, config_path,
+    hash_config_bytes, parse_aliases,
 };
 use crate::core::discovery::ServiceInfo;
 use crate::core::discovery::discover_services;
-use crate::core::framework::{FrameworkId, FrameworkRegistry};
+use crate::core::framework::{FrameworkId, FrameworkRegistry, user_dir_fingerprint};
 use crate::core::manager::{Manager, ManagerEvent};
 use crate::core::project::{LogEntry, ProcessOrigin, Project, ProjectStatus};
 use crate::i18n::{Language, Msg, fill};
@@ -116,9 +116,13 @@ pub enum ConfirmAction {
     RemoveProject(String),
 }
 
-/// Inline add-project form fields
-#[derive(Debug, Clone)]
-pub enum AddField {
+const CRASH_RESTART_MAX: u32 = 3;
+const CRASH_STABLE_SECS: u64 = 30;
+
+/// Inline add/edit project form fields. Conditional fields (PHP, compose)
+/// are skipped by `next_field` when the selected recipe does not use them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormField {
     Name,
     Domain,
     Aliases,
@@ -126,13 +130,43 @@ pub enum AddField {
     UpstreamHost,
     Type,
     Tls,
+    Autostart,
+    Restart,
+    PhpVersion,
+    ComposeFile,
+    Service,
+    Profiles,
     Path,
 }
 
-/// State for the inline add-project form
+const FORM_FIELD_ORDER: &[FormField] = &[
+    FormField::Name,
+    FormField::Domain,
+    FormField::Aliases,
+    FormField::Port,
+    FormField::UpstreamHost,
+    FormField::Type,
+    FormField::Tls,
+    FormField::Autostart,
+    FormField::Restart,
+    FormField::PhpVersion,
+    FormField::ComposeFile,
+    FormField::Service,
+    FormField::Profiles,
+    FormField::Path,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormMode {
+    Add,
+    Edit { project_index: usize },
+}
+
+/// Shared add/edit project form.
 #[derive(Debug, Clone)]
-pub struct AddForm {
-    pub field: AddField,
+pub struct ProjectForm {
+    pub mode: FormMode,
+    pub field: FormField,
     pub name: String,
     pub domain: String,
     pub aliases: String,
@@ -141,28 +175,20 @@ pub struct AddForm {
     pub type_index: usize,
     pub type_ids: Vec<String>,
     pub tls: bool,
+    pub autostart: bool,
+    pub restart: bool,
+    pub php_version: String,
+    pub compose_file: String,
+    pub service: String,
+    pub profiles: String,
     pub path: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct EditForm {
-    pub project_index: usize,
-    pub field: AddField,
-    pub name: String,
-    pub domain: String,
-    pub aliases: String,
-    pub port: String,
-    pub upstream_host: String,
-    pub type_index: usize,
-    pub type_ids: Vec<String>,
-    pub tls: bool,
-    pub path: String,
-}
-
-impl AddForm {
-    pub fn new(type_ids: Vec<String>) -> Self {
+impl ProjectForm {
+    pub fn new_add(type_ids: Vec<String>) -> Self {
         Self {
-            field: AddField::Name,
+            mode: FormMode::Add,
+            field: FormField::Name,
             name: String::new(),
             domain: String::new(),
             aliases: String::new(),
@@ -171,125 +197,16 @@ impl AddForm {
             type_index: 0,
             type_ids,
             tls: false,
+            autostart: false,
+            restart: false,
+            php_version: String::new(),
+            compose_file: String::new(),
+            service: String::new(),
+            profiles: String::new(),
             path: String::new(),
         }
     }
 
-    pub fn project_type(&self) -> &str {
-        self.type_ids
-            .get(self.type_index)
-            .map(String::as_str)
-            .unwrap_or("phoenix")
-    }
-
-    pub fn cycle_type_next(&mut self) {
-        if self.type_ids.is_empty() {
-            return;
-        }
-        self.type_index = (self.type_index + 1) % self.type_ids.len();
-    }
-
-    pub fn cycle_type_prev(&mut self) {
-        if self.type_ids.is_empty() {
-            return;
-        }
-        if self.type_index == 0 {
-            self.type_index = self.type_ids.len() - 1;
-        } else {
-            self.type_index -= 1;
-        }
-    }
-
-    pub fn toggle_tls(&mut self) {
-        self.tls = !self.tls;
-    }
-
-    pub fn current_value(&self) -> &str {
-        match self.field {
-            AddField::Name => &self.name,
-            AddField::Domain => &self.domain,
-            AddField::Aliases => &self.aliases,
-            AddField::Port => &self.port,
-            AddField::UpstreamHost => &self.upstream_host,
-            AddField::Type => self.project_type(),
-            AddField::Tls => {
-                if self.tls {
-                    "on"
-                } else {
-                    "off"
-                }
-            }
-            AddField::Path => &self.path,
-        }
-    }
-
-    pub fn current_value_mut(&mut self) -> &mut String {
-        match self.field {
-            AddField::Name => &mut self.name,
-            AddField::Domain => &mut self.domain,
-            AddField::Aliases => &mut self.aliases,
-            AddField::Port => &mut self.port,
-            AddField::UpstreamHost => &mut self.upstream_host,
-            AddField::Type => unreachable!("Type field uses cycle, not freetext"),
-            AddField::Tls => unreachable!("TLS field uses toggle, not freetext"),
-            AddField::Path => &mut self.path,
-        }
-    }
-
-    pub fn label_msg(&self) -> Msg {
-        match self.field {
-            AddField::Name => Msg::LabelName,
-            AddField::Domain => Msg::LabelDomain,
-            AddField::Aliases => Msg::LabelAliases,
-            AddField::Port => Msg::LabelPort,
-            AddField::UpstreamHost => Msg::LabelUpstream,
-            AddField::Type => Msg::LabelType,
-            AddField::Tls => Msg::LabelTls,
-            AddField::Path => Msg::LabelDirectory,
-        }
-    }
-
-    /// Advance to next field, returns true if form is complete
-    pub fn next_field(&mut self, tld: &str) -> bool {
-        match self.field {
-            AddField::Name => {
-                if self.domain.is_empty() {
-                    let slug = crate::core::slugify(&self.name);
-                    self.domain = format!("{}.{}", slug, tld);
-                }
-                self.field = AddField::Domain;
-                false
-            }
-            AddField::Domain => {
-                self.field = AddField::Aliases;
-                false
-            }
-            AddField::Aliases => {
-                self.field = AddField::Port;
-                false
-            }
-            AddField::Port => {
-                self.field = AddField::UpstreamHost;
-                false
-            }
-            AddField::UpstreamHost => {
-                self.field = AddField::Type;
-                false
-            }
-            AddField::Type => {
-                self.field = AddField::Tls;
-                false
-            }
-            AddField::Tls => {
-                self.field = AddField::Path;
-                false
-            }
-            AddField::Path => true,
-        }
-    }
-}
-
-impl EditForm {
     pub fn from_project(
         project_index: usize,
         project: &ProjectConfig,
@@ -302,8 +219,8 @@ impl EditForm {
         let type_index = type_ids.iter().position(|t| t == current).unwrap_or(0);
 
         Self {
-            project_index,
-            field: AddField::Name,
+            mode: FormMode::Edit { project_index },
+            field: FormField::Name,
             name: project.name.clone(),
             domain: project.domain.clone(),
             aliases: project.aliases.join(", "),
@@ -312,7 +229,24 @@ impl EditForm {
             type_index,
             type_ids,
             tls: project.tls,
+            autostart: project.autostart,
+            restart: project.restart.is_on_crash(),
+            php_version: project.php_version.clone().unwrap_or_default(),
+            compose_file: project.compose_file.clone().unwrap_or_default(),
+            service: project.service.clone().unwrap_or_default(),
+            profiles: project.compose_profiles.join(", "),
             path: project.path.clone(),
+        }
+    }
+
+    pub fn is_add(&self) -> bool {
+        matches!(self.mode, FormMode::Add)
+    }
+
+    pub fn edit_index(&self) -> Option<usize> {
+        match self.mode {
+            FormMode::Edit { project_index } => Some(project_index),
+            FormMode::Add => None,
         }
     }
 
@@ -321,6 +255,40 @@ impl EditForm {
             .get(self.type_index)
             .map(String::as_str)
             .unwrap_or("phoenix")
+    }
+
+    pub fn project_type_id(&self) -> FrameworkId {
+        self.project_type()
+            .parse()
+            .unwrap_or_else(|_| FrameworkId::new(self.project_type()))
+    }
+
+    pub fn uses_php(&self, frameworks: &FrameworkRegistry) -> bool {
+        frameworks
+            .get(&self.project_type_id())
+            .map(|s| s.uses_php())
+            .unwrap_or(false)
+    }
+
+    pub fn is_compose(&self, frameworks: &FrameworkRegistry) -> bool {
+        frameworks.is_compose(&self.project_type_id())
+    }
+
+    pub fn field_visible(&self, field: FormField, frameworks: &FrameworkRegistry) -> bool {
+        match field {
+            FormField::PhpVersion => self.uses_php(frameworks),
+            FormField::ComposeFile | FormField::Service | FormField::Profiles => {
+                self.is_compose(frameworks)
+            }
+            _ => true,
+        }
+    }
+
+    pub fn is_selector_field(&self) -> bool {
+        matches!(
+            self.field,
+            FormField::Type | FormField::Tls | FormField::Autostart | FormField::Restart
+        )
     }
 
     pub fn cycle_type_next(&mut self) {
@@ -341,87 +309,125 @@ impl EditForm {
         }
     }
 
-    pub fn toggle_tls(&mut self) {
-        self.tls = !self.tls;
+    pub fn apply_type_defaults(&mut self, frameworks: &FrameworkRegistry) {
+        if self.is_add() && self.uses_php(frameworks) && self.php_version.trim().is_empty() {
+            self.php_version = "8.3".into();
+        }
+    }
+
+    pub fn toggle_current_selector(&mut self) {
+        match self.field {
+            FormField::Tls => self.tls = !self.tls,
+            FormField::Autostart => self.autostart = !self.autostart,
+            FormField::Restart => self.restart = !self.restart,
+            _ => {}
+        }
+    }
+
+    pub fn refresh_type_ids(&mut self, type_ids: Vec<String>) {
+        let current = self.project_type().to_string();
+        let mut ids = type_ids;
+        if !current.is_empty() && !ids.iter().any(|t| t == &current) {
+            ids.insert(0, current.clone());
+        }
+        self.type_index = ids.iter().position(|t| t == &current).unwrap_or(0);
+        self.type_ids = ids;
     }
 
     pub fn current_value(&self) -> &str {
         match self.field {
-            AddField::Name => &self.name,
-            AddField::Domain => &self.domain,
-            AddField::Aliases => &self.aliases,
-            AddField::Port => &self.port,
-            AddField::UpstreamHost => &self.upstream_host,
-            AddField::Type => self.project_type(),
-            AddField::Tls => {
+            FormField::Name => &self.name,
+            FormField::Domain => &self.domain,
+            FormField::Aliases => &self.aliases,
+            FormField::Port => &self.port,
+            FormField::UpstreamHost => &self.upstream_host,
+            FormField::Type => self.project_type(),
+            FormField::Tls => {
                 if self.tls {
                     "on"
                 } else {
                     "off"
                 }
             }
-            AddField::Path => &self.path,
+            FormField::Autostart => {
+                if self.autostart {
+                    "on"
+                } else {
+                    "off"
+                }
+            }
+            FormField::Restart => {
+                if self.restart {
+                    "on-crash"
+                } else {
+                    "never"
+                }
+            }
+            FormField::PhpVersion => &self.php_version,
+            FormField::ComposeFile => &self.compose_file,
+            FormField::Service => &self.service,
+            FormField::Profiles => &self.profiles,
+            FormField::Path => &self.path,
         }
     }
 
     pub fn current_value_mut(&mut self) -> &mut String {
         match self.field {
-            AddField::Name => &mut self.name,
-            AddField::Domain => &mut self.domain,
-            AddField::Aliases => &mut self.aliases,
-            AddField::Port => &mut self.port,
-            AddField::UpstreamHost => &mut self.upstream_host,
-            AddField::Type => unreachable!("Type field uses cycle, not freetext"),
-            AddField::Tls => unreachable!("TLS field uses toggle, not freetext"),
-            AddField::Path => &mut self.path,
+            FormField::Name => &mut self.name,
+            FormField::Domain => &mut self.domain,
+            FormField::Aliases => &mut self.aliases,
+            FormField::Port => &mut self.port,
+            FormField::UpstreamHost => &mut self.upstream_host,
+            FormField::PhpVersion => &mut self.php_version,
+            FormField::ComposeFile => &mut self.compose_file,
+            FormField::Service => &mut self.service,
+            FormField::Profiles => &mut self.profiles,
+            FormField::Path => &mut self.path,
+            FormField::Type | FormField::Tls | FormField::Autostart | FormField::Restart => {
+                unreachable!("selector field uses cycle/toggle, not freetext")
+            }
         }
     }
 
     pub fn label_msg(&self) -> Msg {
         match self.field {
-            AddField::Name => Msg::LabelName,
-            AddField::Domain => Msg::LabelDomain,
-            AddField::Aliases => Msg::LabelAliases,
-            AddField::Port => Msg::LabelPort,
-            AddField::UpstreamHost => Msg::LabelUpstream,
-            AddField::Type => Msg::LabelType,
-            AddField::Tls => Msg::LabelTls,
-            AddField::Path => Msg::LabelDirectory,
+            FormField::Name => Msg::LabelName,
+            FormField::Domain => Msg::LabelDomain,
+            FormField::Aliases => Msg::LabelAliases,
+            FormField::Port => Msg::LabelPort,
+            FormField::UpstreamHost => Msg::LabelUpstream,
+            FormField::Type => Msg::LabelType,
+            FormField::Tls => Msg::LabelTls,
+            FormField::Autostart => Msg::LabelAutostart,
+            FormField::Restart => Msg::LabelRestart,
+            FormField::PhpVersion => Msg::LabelPhp,
+            FormField::ComposeFile => Msg::LabelComposeFile,
+            FormField::Service => Msg::LabelService,
+            FormField::Profiles => Msg::LabelProfiles,
+            FormField::Path => Msg::LabelDirectory,
         }
     }
 
-    pub fn next_field(&mut self) -> bool {
-        match self.field {
-            AddField::Name => {
-                self.field = AddField::Domain;
-                false
-            }
-            AddField::Domain => {
-                self.field = AddField::Aliases;
-                false
-            }
-            AddField::Aliases => {
-                self.field = AddField::Port;
-                false
-            }
-            AddField::Port => {
-                self.field = AddField::UpstreamHost;
-                false
-            }
-            AddField::UpstreamHost => {
-                self.field = AddField::Type;
-                false
-            }
-            AddField::Type => {
-                self.field = AddField::Tls;
-                false
-            }
-            AddField::Tls => {
-                self.field = AddField::Path;
-                false
-            }
-            AddField::Path => true,
+    /// Advance to the next visible field. Returns true if the form is complete.
+    pub fn next_field(&mut self, tld: &str, frameworks: &FrameworkRegistry) -> bool {
+        if self.field == FormField::Name
+            && self.is_add()
+            && self.domain.is_empty()
+            && !self.name.is_empty()
+        {
+            let slug = crate::core::slugify(&self.name);
+            self.domain = format!("{}.{}", slug, tld);
         }
+        let Some(idx) = FORM_FIELD_ORDER.iter().position(|f| *f == self.field) else {
+            return true;
+        };
+        for next in FORM_FIELD_ORDER.iter().skip(idx + 1) {
+            if self.field_visible(*next, frameworks) {
+                self.field = *next;
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -461,10 +467,8 @@ pub struct App {
     pub show_theme_popup: bool,
     pub theme_selected: usize,
     pub theme_choices: Vec<ThemeMeta>,
-    /// Inline add-project form
-    pub add_form: Option<AddForm>,
-    /// Inline edit-project form
-    pub edit_form: Option<EditForm>,
+    /// Inline add/edit project form
+    pub form: Option<ProjectForm>,
     /// Unmanaged discovered services
     pub unmanaged_all_services: Vec<ServiceInfo>,
     pub unmanaged_services: Vec<ServiceInfo>,
@@ -493,6 +497,10 @@ pub struct App {
     config_mtime: Option<std::time::SystemTime>,
     config_len: u64,
     last_config_poll: Instant,
+    registry_hash: u64,
+    expecting_stop: HashSet<String>,
+    crash_attempts: HashMap<String, u32>,
+    pending_restarts: HashMap<String, Instant>,
 }
 
 /// The two channel receivers, handed from `App` to the main run loop so that
@@ -532,8 +540,7 @@ impl App {
             show_theme_popup: false,
             theme_selected: 0,
             theme_choices: vec![],
-            add_form: None,
-            edit_form: None,
+            form: None,
             unmanaged_all_services: vec![],
             unmanaged_services: vec![],
             unmanaged_selected: 0,
@@ -559,8 +566,13 @@ impl App {
             config_mtime: None,
             config_len: 0,
             last_config_poll: Instant::now(),
+            registry_hash: 0,
+            expecting_stop: HashSet::new(),
+            crash_attempts: HashMap::new(),
+            pending_restarts: HashMap::new(),
         };
         app.prime_config_watch();
+        app.prime_registry_watch();
         app
     }
 
@@ -801,6 +813,14 @@ impl App {
             changed = true;
         }
 
+        if self.poll_registry_reload() {
+            changed = true;
+        }
+
+        if self.tick_pending_restarts().await {
+            changed = true;
+        }
+
         self.schedule_background_refreshes();
 
         if self.spinner_active() {
@@ -986,28 +1006,111 @@ impl App {
                     self.trf(Msg::Started, &[("name", &project_name)])
                 });
             }
-            ManagerEvent::ProcessExited {
-                project_name,
-                success,
-            } => {
+            ManagerEvent::ProcessExited { project_name } => {
                 self.manager.mark_exited(&project_name);
                 self.startup_phases.remove(&project_name);
-                if let Some(p) = self.find_project_mut(&project_name) {
-                    // If already Stopped (set by stop_project), don't override to Failed.
-                    // Signal-killed processes exit non-success, which is expected on stop.
-                    if p.status != ProjectStatus::Stopped {
-                        p.status = if success {
-                            ProjectStatus::Stopped
-                        } else {
-                            ProjectStatus::Failed("exited with error".into())
-                        };
+                let expected = self.expecting_stop.remove(&project_name);
+                if expected {
+                    if let Some(p) = self.find_project_mut(&project_name) {
+                        p.status = ProjectStatus::Stopped;
+                        p.pid = None;
+                        p.origin = None;
+                        p.started_at = None;
                     }
-                    p.pid = None;
-                    p.origin = None;
-                    p.started_at = None;
+                } else {
+                    self.on_unexpected_exit(&project_name);
                 }
             }
         }
+    }
+
+    fn on_unexpected_exit(&mut self, name: &str) {
+        let (origin, started_at, policy) = self
+            .find_project_mut(name)
+            .map(|p| (p.origin.clone(), p.started_at, p.config.restart))
+            .unwrap_or((None, None, RestartPolicy::Never));
+
+        if let Some(p) = self.find_project_mut(name) {
+            p.status = ProjectStatus::Failed("exited unexpectedly".into());
+            p.pid = None;
+            p.origin = None;
+            p.started_at = None;
+        }
+
+        self.append_system_log(name, self.trf(Msg::Crashed, &[("name", name)]), true);
+
+        if origin != Some(ProcessOrigin::Managed) || !policy.is_on_crash() {
+            self.status_message = Some(self.trf(Msg::Crashed, &[("name", name)]));
+            return;
+        }
+
+        let ran_stably = started_at
+            .map(|t| {
+                (Local::now() - t)
+                    .to_std()
+                    .map(|d| d >= Duration::from_secs(CRASH_STABLE_SECS))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if ran_stably {
+            self.crash_attempts.insert(name.to_string(), 0);
+        }
+
+        let attempt = self.crash_attempts.entry(name.to_string()).or_insert(0);
+        *attempt += 1;
+        let n = *attempt;
+        if n > CRASH_RESTART_MAX {
+            self.status_message = Some(self.trf(Msg::RestartGaveUp, &[("name", name)]));
+            return;
+        }
+
+        let delay_secs = 1u64 << (n - 1).min(2);
+        self.pending_restarts.insert(
+            name.to_string(),
+            Instant::now() + Duration::from_secs(delay_secs),
+        );
+        let seconds = delay_secs.to_string();
+        let attempt_s = n.to_string();
+        let max_s = CRASH_RESTART_MAX.to_string();
+        let msg = self.trf(
+            Msg::CrashedRestarting,
+            &[
+                ("name", name),
+                ("seconds", &seconds),
+                ("attempt", &attempt_s),
+                ("max", &max_s),
+            ],
+        );
+        self.append_system_log(name, msg.clone(), true);
+        self.status_message = Some(msg);
+    }
+
+    async fn tick_pending_restarts(&mut self) -> bool {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .pending_restarts
+            .iter()
+            .filter(|(_, at)| now >= **at)
+            .map(|(n, _)| n.clone())
+            .collect();
+        if due.is_empty() {
+            return false;
+        }
+        for name in &due {
+            self.pending_restarts.remove(name);
+            if self.expecting_stop.contains(name) {
+                continue;
+            }
+            if self
+                .projects
+                .iter()
+                .any(|p| p.config.name == *name && p.is_running())
+            {
+                continue;
+            }
+            self.start_named(name).await;
+        }
+        true
     }
 
     pub(crate) fn find_project_mut(&mut self, name: &str) -> Option<&mut Project> {
@@ -1079,68 +1182,77 @@ impl App {
 
     pub(crate) async fn start_selected(&mut self) {
         if let Some(project) = self.projects.get(self.selected) {
-            let config = project.config.clone();
-            let name = config.name.clone();
+            let name = project.config.name.clone();
+            self.start_named(&name).await;
+        }
+    }
 
-            if let Some(p) = self.find_project_mut(&name) {
-                p.status = ProjectStatus::Starting;
-            }
-            self.startup_phases
-                .insert(name.clone(), StartupPhase::EnsuringCaddy);
+    async fn start_named(&mut self, name: &str) {
+        let Some(project) = self.projects.iter().find(|p| p.config.name == name) else {
+            return;
+        };
+        if project.is_running() {
+            return;
+        }
+        let config = project.config.clone();
+        let name = config.name.clone();
 
-            // Ensure Caddy is running with current config before starting the project
-            self.append_system_log(&name, "step 1/3: ensuring Caddy config", false);
-            self.status_message = Some(self.trf(Msg::StepEnsuringCaddy, &[("name", &name)]));
-            if let Some(caddy_err) = self.ensure_caddy().await {
-                self.append_system_log(&name, caddy_err, true);
-            }
+        self.expecting_stop.remove(&name);
+        self.pending_restarts.remove(&name);
 
-            self.startup_phases
-                .insert(name.clone(), StartupPhase::StartingProcess);
-            match self.manager.start(&config).await {
-                Ok(_status) => {
-                    if let Some(p) = self.find_project_mut(&name) {
-                        p.status = ProjectStatus::Starting;
-                        p.origin = Some(ProcessOrigin::Managed);
-                    }
+        if let Some(p) = self.find_project_mut(&name) {
+            p.status = ProjectStatus::Starting;
+        }
+        self.startup_phases
+            .insert(name.clone(), StartupPhase::EnsuringCaddy);
 
-                    self.append_system_log(&name, "step 2/3: process start requested", false);
+        // Ensure Caddy is running with current config before starting the project
+        self.append_system_log(&name, "step 1/3: ensuring Caddy config", false);
+        self.status_message = Some(self.trf(Msg::StepEnsuringCaddy, &[("name", &name)]));
+        if let Some(caddy_err) = self.ensure_caddy().await {
+            self.append_system_log(&name, caddy_err, true);
+        }
 
-                    self.startup_phases
-                        .insert(name.clone(), StartupPhase::VerifyingDomain);
-                    self.append_system_log(&name, "step 3/3: verifying domain with curl", false);
-                    self.status_message = Some(self.trf(Msg::StepVerifying, &[("name", &name)]));
-
-                    let tx = self.app_event_tx.clone();
-                    let attempts = self
-                        .frameworks
-                        .get(&config.project_type)
-                        .map(|s| s.lifecycle.ready_attempts)
-                        .unwrap_or(8);
-                    tokio::spawn(async move {
-                        let result =
-                            crate::core::ready::verify_project_domain(&config, attempts).await;
-                        let _ = tx
-                            .send(BackgroundEvent::DomainVerificationDone {
-                                project_name: name,
-                                result,
-                            })
-                            .await;
-                    });
+        self.startup_phases
+            .insert(name.clone(), StartupPhase::StartingProcess);
+        match self.manager.start(&config).await {
+            Ok(_status) => {
+                if let Some(p) = self.find_project_mut(&name) {
+                    p.status = ProjectStatus::Starting;
+                    p.origin = Some(ProcessOrigin::Managed);
                 }
-                Err(e) => {
-                    self.startup_phases.remove(&name);
-                    if let Some(p) = self.find_project_mut(&name) {
-                        p.status = ProjectStatus::Failed(e.to_string());
-                    }
-                    let err = e.to_string();
-                    self.append_system_log(
-                        &name,
-                        self.trf(Msg::StartFailed, &[("error", &err)]),
-                        true,
-                    );
-                    self.status_message = Some(self.trf(Msg::Error, &[("error", &err)]));
+
+                self.append_system_log(&name, "step 2/3: process start requested", false);
+
+                self.startup_phases
+                    .insert(name.clone(), StartupPhase::VerifyingDomain);
+                self.append_system_log(&name, "step 3/3: verifying domain with curl", false);
+                self.status_message = Some(self.trf(Msg::StepVerifying, &[("name", &name)]));
+
+                let tx = self.app_event_tx.clone();
+                let attempts = self
+                    .frameworks
+                    .get(&config.project_type)
+                    .map(|s| s.lifecycle.ready_attempts)
+                    .unwrap_or(8);
+                tokio::spawn(async move {
+                    let result = crate::core::ready::verify_project_domain(&config, attempts).await;
+                    let _ = tx
+                        .send(BackgroundEvent::DomainVerificationDone {
+                            project_name: name,
+                            result,
+                        })
+                        .await;
+                });
+            }
+            Err(e) => {
+                self.startup_phases.remove(&name);
+                if let Some(p) = self.find_project_mut(&name) {
+                    p.status = ProjectStatus::Failed(e.to_string());
                 }
+                let err = e.to_string();
+                self.append_system_log(&name, self.trf(Msg::StartFailed, &[("error", &err)]), true);
+                self.status_message = Some(self.trf(Msg::Error, &[("error", &err)]));
             }
         }
     }
@@ -1163,6 +1275,9 @@ impl App {
     pub(crate) async fn stop_project(&mut self, name: &str) {
         let name = name.to_string();
         self.startup_phases.remove(&name);
+        self.pending_restarts.remove(&name);
+        self.crash_attempts.remove(&name);
+        self.expecting_stop.insert(name.clone());
         match self.manager.stop(&name).await {
             Ok(()) => {
                 if let Some(p) = self.find_project_mut(&name) {
@@ -1174,6 +1289,7 @@ impl App {
                 self.status_message = Some(self.trf(Msg::Stopped, &[("name", &name)]));
             }
             Err(e) => {
+                self.expecting_stop.remove(&name);
                 self.status_message = Some(self.trf(Msg::Error, &[("error", &e.to_string())]));
             }
         }
@@ -1311,95 +1427,157 @@ impl App {
         self.status_message = Some(self.trf(Msg::Removed, &[("name", name)]));
     }
 
-    pub(crate) async fn finalize_add(&mut self, form: AddForm) {
+    pub(crate) async fn finalize_form(&mut self, form: ProjectForm) {
+        if let Some(err) = self.form_error(&form) {
+            self.status_message = Some(err);
+            return;
+        }
+
         let project_type = form
             .project_type()
             .parse::<FrameworkId>()
             .unwrap_or_else(|_| FrameworkId::new("phoenix"));
-        let port = match form.port.parse::<u16>() {
-            Ok(0) => {
-                self.status_message = Some(self.tr(Msg::InvalidPortRange).into());
-                return;
-            }
-            Ok(p) => p,
-            Err(_) => {
-                self.status_message = Some(self.trf(Msg::InvalidPort, &[("port", &form.port)]));
-                return;
-            }
-        };
-
-        if form.name.trim().is_empty() {
-            self.status_message = Some(self.tr(Msg::NameEmpty).into());
-            return;
-        }
-        if form.domain.trim().is_empty() {
-            self.status_message = Some(self.tr(Msg::DomainEmpty).into());
-            return;
-        }
-        if !std::path::Path::new(&form.path).is_dir() {
-            self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
-            return;
-        }
-        if let Some(host) = parse_upstream_host(&form.upstream_host) {
-            if !is_valid_upstream_host(&host) {
-                self.status_message = Some(self.trf(Msg::InvalidUpstream, &[("host", &host)]));
-                return;
-            }
-        }
-        if self.projects.iter().any(|p| p.config.name == form.name) {
-            self.status_message = Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
-            return;
-        }
+        let port: u16 = form.port.parse().expect("validated");
         let aliases = parse_aliases(&form.aliases);
-        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
-            .chain(aliases.iter().map(String::as_str))
-            .collect();
-        if let Some(err) = self.tld_mismatch(&hosts) {
-            self.status_message = Some(err);
-            return;
-        }
-        if let Some(err) = self.hostname_conflict(&hosts, None) {
-            self.status_message = Some(err);
-            return;
-        }
-        if self.projects.iter().any(|p| p.config.port == port) {
-            self.status_message = Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
-            return;
-        }
+        let spec = self.frameworks.get(&project_type);
+        let uses_php = spec.map(|s| s.uses_php()).unwrap_or(false);
+        let is_compose = spec.map(|s| s.is_compose()).unwrap_or(false);
 
-        let config = ProjectConfig {
-            name: form.name.clone(),
-            domain: form.domain,
-            aliases,
-            port,
-            project_type,
-            path: form.path,
-            php_version: None,
-            public_dir: None,
-            command: None,
-            compose_file: None,
-            service: None,
-            compose_profiles: vec![],
-            upstream_host: parse_upstream_host(&form.upstream_host),
-            args: vec![],
-            env: Default::default(),
-            autostart: false,
-            tls: form.tls,
+        let php_version = if uses_php {
+            let v = form.php_version.trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        } else {
+            None
+        };
+        let compose_file = if is_compose {
+            let v = form.compose_file.trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        } else {
+            None
+        };
+        let service = if is_compose {
+            let v = form.service.trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        } else {
+            None
+        };
+        let compose_profiles = if is_compose {
+            parse_aliases(&form.profiles)
+        } else {
+            vec![]
+        };
+        let restart = if form.restart {
+            RestartPolicy::OnCrash
+        } else {
+            RestartPolicy::Never
         };
 
-        self.projects.push(Project::new(config));
-        self.selected = self.projects.len() - 1;
+        match form.mode {
+            FormMode::Add => {
+                let config = ProjectConfig {
+                    name: form.name.clone(),
+                    domain: form.domain.clone(),
+                    aliases,
+                    port,
+                    project_type,
+                    path: form.path.clone(),
+                    php_version,
+                    public_dir: None,
+                    command: None,
+                    compose_file,
+                    service,
+                    compose_profiles,
+                    upstream_host: parse_upstream_host(&form.upstream_host),
+                    args: vec![],
+                    env: Default::default(),
+                    autostart: form.autostart,
+                    restart,
+                    tls: form.tls,
+                };
+                self.projects.push(Project::new(config));
+                self.selected = self.projects.len() - 1;
+                if let Err(e) = self.save_config() {
+                    self.status_message =
+                        Some(self.trf(Msg::AddedUnsaved, &[("error", &e.to_string())]));
+                    return;
+                }
+                self.ensure_caddy().await;
+                self.refresh_unmanaged().await;
+                self.status_message = Some(self.trf(Msg::Added, &[("name", &form.name)]));
+            }
+            FormMode::Edit { project_index } => {
+                if project_index >= self.projects.len() {
+                    self.status_message = Some(self.tr(Msg::ProjectGone).into());
+                    return;
+                }
+                let existing = self.projects[project_index].config.clone();
+                let updated = ProjectConfig {
+                    name: form.name.clone(),
+                    domain: form.domain.clone(),
+                    aliases,
+                    port,
+                    project_type,
+                    path: form.path.clone(),
+                    php_version,
+                    public_dir: existing.public_dir,
+                    command: existing.command,
+                    compose_file,
+                    service,
+                    compose_profiles,
+                    upstream_host: parse_upstream_host(&form.upstream_host),
+                    args: existing.args,
+                    env: existing.env,
+                    autostart: form.autostart,
+                    restart,
+                    tls: form.tls,
+                };
+                self.projects[project_index].config = updated;
+                if let Err(e) = self.save_config() {
+                    self.status_message =
+                        Some(self.trf(Msg::UpdatedUnsaved, &[("error", &e.to_string())]));
+                    return;
+                }
+                self.ensure_caddy().await;
+                self.refresh_unmanaged().await;
+                self.status_message = Some(self.trf(Msg::Updated, &[("name", &form.name)]));
+            }
+        }
+    }
 
-        if let Err(e) = self.save_config() {
-            self.status_message = Some(self.trf(Msg::AddedUnsaved, &[("error", &e.to_string())]));
+    pub(crate) fn start_edit_selected(&mut self) {
+        let Some(project) = self.selected_project() else {
+            self.status_message = Some(self.tr(Msg::NoProject).into());
+            return;
+        };
+
+        let running = project.is_running();
+        let project_name = project.config.name.clone();
+        let project_config = project.config.clone();
+
+        if running {
+            self.status_message = Some(self.trf(Msg::StopBeforeEdit, &[("name", &project_name)]));
             return;
         }
 
-        // Update Caddyfile with the new project and start/reload Caddy
-        self.ensure_caddy().await;
-        self.refresh_unmanaged().await;
-
-        self.status_message = Some(self.trf(Msg::Added, &[("name", &form.name)]));
+        let idx = self.selected;
+        self.form = Some(ProjectForm::from_project(
+            idx,
+            &project_config,
+            self.frameworks.ids(),
+        ));
+        self.status_message = Some(self.tr(Msg::EditingProject).into());
     }
 
     /// First hostname (primary domain or alias) that doesn't end with the
@@ -1443,188 +1621,8 @@ impl App {
         None
     }
 
-    pub fn add_form_error(&self, form: &AddForm) -> Option<String> {
-        if form.name.trim().is_empty() {
-            return Some(self.tr(Msg::NameEmpty).into());
-        }
-        if self.projects.iter().any(|p| p.config.name == form.name) {
-            return Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
-        }
-
-        if form.domain.trim().is_empty() {
-            return Some(self.tr(Msg::DomainEmpty).into());
-        }
-        let aliases = parse_aliases(&form.aliases);
-        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
-            .chain(aliases.iter().map(String::as_str))
-            .collect();
-        if let Some(err) = self.tld_mismatch(&hosts) {
-            return Some(err);
-        }
-        if let Some(err) = self.hostname_conflict(&hosts, None) {
-            return Some(err);
-        }
-
-        let port = match form.port.parse::<u16>() {
-            Ok(port) => port,
-            Err(_) => return Some(self.trf(Msg::InvalidPort, &[("port", &form.port)])),
-        };
-        if self.projects.iter().any(|p| p.config.port == port) {
-            return Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
-        }
-        if let Some(host) = parse_upstream_host(&form.upstream_host) {
-            if !is_valid_upstream_host(&host) {
-                return Some(self.trf(Msg::InvalidUpstream, &[("host", &host)]));
-            }
-        }
-
-        if form.path.trim().is_empty() {
-            return Some(self.tr(Msg::DirEmpty).into());
-        }
-        if !std::path::Path::new(&form.path).is_dir() {
-            return Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
-        }
-
-        None
-    }
-
-    pub(crate) fn start_edit_selected(&mut self) {
-        let Some(project) = self.selected_project() else {
-            self.status_message = Some(self.tr(Msg::NoProject).into());
-            return;
-        };
-
-        let running = project.is_running();
-        let project_name = project.config.name.clone();
-        let project_config = project.config.clone();
-
-        if running {
-            self.status_message = Some(self.trf(Msg::StopBeforeEdit, &[("name", &project_name)]));
-            return;
-        }
-
-        let idx = self.selected;
-        self.add_form = None;
-        self.edit_form = Some(EditForm::from_project(
-            idx,
-            &project_config,
-            self.frameworks.ids(),
-        ));
-        self.status_message = Some(self.tr(Msg::EditingProject).into());
-    }
-
-    pub(crate) async fn finalize_edit(&mut self, form: EditForm) {
-        if form.project_index >= self.projects.len() {
-            self.status_message = Some(self.tr(Msg::ProjectGone).into());
-            return;
-        }
-
-        let project_type = form
-            .project_type()
-            .parse::<FrameworkId>()
-            .unwrap_or_else(|_| FrameworkId::new("phoenix"));
-        let port = match form.port.parse::<u16>() {
-            Ok(0) => {
-                self.status_message = Some(self.tr(Msg::InvalidPortRange).into());
-                return;
-            }
-            Ok(p) => p,
-            Err(_) => {
-                self.status_message = Some(self.trf(Msg::InvalidPort, &[("port", &form.port)]));
-                return;
-            }
-        };
-
-        if form.name.trim().is_empty() {
-            self.status_message = Some(self.tr(Msg::NameEmpty).into());
-            return;
-        }
-        if form.domain.trim().is_empty() {
-            self.status_message = Some(self.tr(Msg::DomainEmpty).into());
-            return;
-        }
-        if !std::path::Path::new(&form.path).is_dir() {
-            self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
-            return;
-        }
-
-        for (idx, project) in self.projects.iter().enumerate() {
-            if idx == form.project_index {
-                continue;
-            }
-            if project.config.name == form.name {
-                self.status_message = Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
-                return;
-            }
-            if project.config.port == port {
-                self.status_message =
-                    Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
-                return;
-            }
-        }
-
-        let aliases = parse_aliases(&form.aliases);
-        let hosts: Vec<&str> = std::iter::once(form.domain.as_str())
-            .chain(aliases.iter().map(String::as_str))
-            .collect();
-        if let Some(err) = self.tld_mismatch(&hosts) {
-            self.status_message = Some(err);
-            return;
-        }
-        if let Some(err) = self.hostname_conflict(&hosts, Some(form.project_index)) {
-            self.status_message = Some(err);
-            return;
-        }
-
-        let existing = self.projects[form.project_index].config.clone();
-        let spec = self.frameworks.get(&project_type);
-        let uses_php = spec.map(|s| s.uses_php()).unwrap_or(false);
-        let is_compose = spec.map(|s| s.is_compose()).unwrap_or(false);
-        let updated = ProjectConfig {
-            name: form.name.clone(),
-            domain: form.domain,
-            aliases,
-            port,
-            project_type: project_type.clone(),
-            path: form.path,
-            php_version: if uses_php {
-                existing.php_version.or_else(|| Some("8.3".into()))
-            } else {
-                None
-            },
-            public_dir: existing.public_dir,
-            command: existing.command,
-            compose_file: if is_compose {
-                existing.compose_file
-            } else {
-                None
-            },
-            service: if is_compose { existing.service } else { None },
-            compose_profiles: if is_compose {
-                existing.compose_profiles
-            } else {
-                vec![]
-            },
-            upstream_host: parse_upstream_host(&form.upstream_host),
-            args: existing.args,
-            env: existing.env,
-            autostart: existing.autostart,
-            tls: form.tls,
-        };
-
-        self.projects[form.project_index].config = updated;
-
-        if let Err(e) = self.save_config() {
-            self.status_message = Some(self.trf(Msg::UpdatedUnsaved, &[("error", &e.to_string())]));
-            return;
-        }
-
-        self.ensure_caddy().await;
-        self.refresh_unmanaged().await;
-        self.status_message = Some(self.trf(Msg::Updated, &[("name", &form.name)]));
-    }
-
-    pub fn edit_form_error(&self, form: &EditForm) -> Option<String> {
+    pub fn form_error(&self, form: &ProjectForm) -> Option<String> {
+        let exclude = form.edit_index();
         if form.name.trim().is_empty() {
             return Some(self.tr(Msg::NameEmpty).into());
         }
@@ -1632,7 +1630,7 @@ impl App {
             .projects
             .iter()
             .enumerate()
-            .any(|(idx, p)| idx != form.project_index && p.config.name == form.name)
+            .any(|(idx, p)| Some(idx) != exclude && p.config.name == form.name)
         {
             return Some(self.trf(Msg::ProjectExists, &[("name", &form.name)]));
         }
@@ -1647,11 +1645,12 @@ impl App {
         if let Some(err) = self.tld_mismatch(&hosts) {
             return Some(err);
         }
-        if let Some(err) = self.hostname_conflict(&hosts, Some(form.project_index)) {
+        if let Some(err) = self.hostname_conflict(&hosts, exclude) {
             return Some(err);
         }
 
         let port = match form.port.parse::<u16>() {
+            Ok(0) => return Some(self.tr(Msg::InvalidPortRange).into()),
             Ok(port) => port,
             Err(_) => return Some(self.trf(Msg::InvalidPort, &[("port", &form.port)])),
         };
@@ -1659,7 +1658,7 @@ impl App {
             .projects
             .iter()
             .enumerate()
-            .any(|(idx, p)| idx != form.project_index && p.config.port == port)
+            .any(|(idx, p)| Some(idx) != exclude && p.config.port == port)
         {
             return Some(self.trf(Msg::PortInUse, &[("port", &port.to_string())]));
         }
@@ -1674,6 +1673,28 @@ impl App {
         }
         if !std::path::Path::new(&form.path).is_dir() {
             return Some(self.trf(Msg::DirNotFound, &[("path", &form.path)]));
+        }
+
+        if form.uses_php(&self.frameworks) && form.is_add() && form.php_version.trim().is_empty() {
+            return Some(self.tr(Msg::PhpVersionEmpty).into());
+        }
+
+        if form.is_compose(&self.frameworks) {
+            let file = form.compose_file.trim();
+            if !file.is_empty() {
+                let candidate = std::path::Path::new(file);
+                let full = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    std::path::Path::new(&form.path).join(candidate)
+                };
+                if !full.is_file() {
+                    return Some(self.trf(
+                        Msg::ComposeFileMissing,
+                        &[("path", &full.display().to_string())],
+                    ));
+                }
+            }
         }
 
         None
@@ -1826,6 +1847,7 @@ impl App {
             args,
             env: Default::default(),
             autostart: false,
+            restart: RestartPolicy::Never,
             tls: false,
         };
 
@@ -1962,9 +1984,47 @@ impl App {
         }
     }
 
+    fn prime_registry_watch(&mut self) {
+        self.registry_hash = user_dir_fingerprint();
+    }
+
+    fn poll_registry_reload(&mut self) -> bool {
+        let hash = user_dir_fingerprint();
+        if hash == self.registry_hash {
+            return false;
+        }
+        self.registry_hash = hash;
+
+        let old_ids: HashSet<String> = self.frameworks.ids().into_iter().collect();
+        let new = self.frameworks.reload();
+        let new_ids: HashSet<String> = new.ids().into_iter().collect();
+        let added: Vec<String> = new_ids.difference(&old_ids).cloned().collect();
+        let removed: Vec<String> = old_ids.difference(&new_ids).cloned().collect();
+        let warnings: Vec<String> = new.warnings().to_vec();
+
+        self.frameworks = new.clone();
+        self.manager.replace_registry(new);
+
+        if let Some(form) = self.form.as_mut() {
+            form.refresh_type_ids(self.frameworks.ids());
+        }
+
+        let mut parts = vec![self.tr(Msg::RecipesReloaded).to_string()];
+        if !added.is_empty() {
+            parts.push(self.trf(Msg::RecipesReloadAdded, &[("name", &added.join(", "))]));
+        }
+        if !removed.is_empty() {
+            parts.push(self.trf(Msg::RecipesReloadRemoved, &[("name", &removed.join(", "))]));
+        }
+        if !warnings.is_empty() {
+            parts.push(self.trf(Msg::RecipesReloadWarn, &[("error", &warnings.join("; "))]));
+        }
+        self.status_message = Some(parts.join(" — "));
+        true
+    }
+
     async fn poll_config_reload(&mut self) -> bool {
-        if self.add_form.is_some()
-            || self.edit_form.is_some()
+        if self.form.is_some()
             || self.confirm_dialog.is_some()
             || self.show_language_popup
             || self.show_theme_popup
@@ -2137,6 +2197,10 @@ impl App {
 
     pub(crate) async fn force_quit(&mut self) {
         self.status_message = Some(self.tr(Msg::ForceQuit).into());
+        self.pending_restarts.clear();
+        for p in &self.projects {
+            self.expecting_stop.insert(p.config.name.clone());
+        }
         self.manager.stop_all().await;
 
         let mut notes: Vec<String> = vec![];
@@ -2336,6 +2400,7 @@ mod tests {
             args: vec![],
             env: Default::default(),
             autostart: false,
+            restart: RestartPolicy::Never,
             tls: false,
         }
     }
@@ -2580,8 +2645,8 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    fn valid_add_form() -> AddForm {
-        let mut form = AddForm::new(vec!["phoenix".to_string()]);
+    fn valid_add_form() -> ProjectForm {
+        let mut form = ProjectForm::new_add(vec!["phoenix".to_string()]);
         form.name = "foo".into();
         form.domain = "foo.test".into();
         form.port = "3000".into();
@@ -2594,7 +2659,7 @@ mod tests {
         let app = app_with(vec![]);
         let mut form = valid_add_form();
         form.domain = "foo.local".into();
-        let err = app.add_form_error(&form).expect("should reject");
+        let err = app.form_error(&form).expect("should reject");
         assert!(err.contains("foo.local"), "unexpected: {err}");
         assert!(err.contains(".test"), "unexpected: {err}");
     }
@@ -2604,26 +2669,198 @@ mod tests {
         let app = app_with(vec![]);
         let mut form = valid_add_form();
         form.aliases = "bar.test, bar.local".into();
-        let err = app.add_form_error(&form).expect("should reject");
+        let err = app.form_error(&form).expect("should reject");
         assert!(err.contains("bar.local"), "unexpected: {err}");
     }
 
     #[test]
     fn add_form_accepts_domain_in_tld() {
         let app = app_with(vec![]);
-        assert_eq!(app.add_form_error(&valid_add_form()), None);
+        assert_eq!(app.form_error(&valid_add_form()), None);
+    }
+
+    #[test]
+    fn add_form_requires_php_version_for_kirby() {
+        let app = app_with(vec![]);
+        let mut form = valid_add_form();
+        form.type_ids = vec!["kirby".into()];
+        form.type_index = 0;
+        form.php_version.clear();
+        let err = app.form_error(&form).expect("php required on add");
+        assert!(err.to_lowercase().contains("php"), "unexpected: {err}");
+        form.php_version = "8.3".into();
+        assert_eq!(app.form_error(&form), None);
+    }
+
+    #[test]
+    fn edit_form_allows_clearing_php_version() {
+        let mut project = project("site", 8001, "kirby");
+        project.php_version = Some("8.1".into());
+        let app = app_with(vec![project.clone()]);
+        let mut form = ProjectForm::from_project(0, &project, vec!["kirby".into()]);
+        form.php_version.clear();
+        assert_eq!(app.form_error(&form), None);
+    }
+
+    #[test]
+    fn apply_type_defaults_fills_php_on_add() {
+        let app = app_with(vec![]);
+        let mut form = ProjectForm::new_add(vec!["phoenix".into(), "kirby".into()]);
+        form.cycle_type_next();
+        form.apply_type_defaults(&app.frameworks);
+        assert_eq!(form.project_type(), "kirby");
+        assert_eq!(form.php_version, "8.3");
     }
 
     #[test]
     fn edit_form_rejects_domain_outside_tld() {
         let app = app_with(vec![project("foo", 3000, "phoenix")]);
-        let mut form = EditForm::from_project(
+        let mut form = ProjectForm::from_project(
             0,
             &project("foo", 3000, "phoenix"),
             vec!["phoenix".to_string()],
         );
         form.domain = "foo.local".into();
-        let err = app.edit_form_error(&form).expect("should reject");
+        let err = app.form_error(&form).expect("should reject");
         assert!(err.contains("foo.local"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn form_type_cycle_skips_php_for_phoenix() {
+        let mut form = ProjectForm::new_add(vec!["phoenix".to_string(), "kirby".to_string()]);
+        let app = app_with(vec![]);
+        assert!(!form.field_visible(FormField::PhpVersion, &app.frameworks));
+        assert!(!form.field_visible(FormField::ComposeFile, &app.frameworks));
+        form.field = FormField::Type;
+        assert!(!form.next_field("test", &app.frameworks));
+        assert_eq!(form.field, FormField::Tls);
+        assert!(!form.next_field("test", &app.frameworks));
+        assert_eq!(form.field, FormField::Autostart);
+        assert!(!form.next_field("test", &app.frameworks));
+        assert_eq!(form.field, FormField::Restart);
+        assert!(!form.next_field("test", &app.frameworks));
+        assert_eq!(form.field, FormField::Path);
+    }
+
+    #[test]
+    fn form_shows_php_for_kirby_and_compose_fields_for_compose() {
+        let mut form = ProjectForm::new_add(vec![
+            "phoenix".to_string(),
+            "kirby".to_string(),
+            "compose".to_string(),
+        ]);
+        let app = app_with(vec![]);
+        form.type_index = 1; // kirby
+        assert!(form.field_visible(FormField::PhpVersion, &app.frameworks));
+        assert!(!form.field_visible(FormField::ComposeFile, &app.frameworks));
+        form.type_index = 2; // compose
+        assert!(!form.field_visible(FormField::PhpVersion, &app.frameworks));
+        assert!(form.field_visible(FormField::ComposeFile, &app.frameworks));
+    }
+
+    #[test]
+    fn form_refresh_type_ids_keeps_selected_id() {
+        let mut form = ProjectForm::new_add(vec!["phoenix".to_string(), "axum".to_string()]);
+        form.type_index = 1;
+        form.refresh_type_ids(vec![
+            "phoenix".to_string(),
+            "axum".to_string(),
+            "rails".to_string(),
+        ]);
+        assert_eq!(form.project_type(), "axum");
+        assert!(form.type_ids.iter().any(|t| t == "rails"));
+    }
+
+    #[test]
+    fn unexpected_exit_marks_failed_even_on_success() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        set_running(&mut app, "alpha", true);
+        app.handle_manager_event(ManagerEvent::ProcessExited {
+            project_name: "alpha".into(),
+        });
+        assert!(matches!(app.projects[0].status, ProjectStatus::Failed(_)));
+        assert!(app.pending_restarts.is_empty());
+    }
+
+    #[test]
+    fn expected_stop_does_not_fail() {
+        let mut app = app_with(vec![project("alpha", 1, "phoenix")]);
+        set_running(&mut app, "alpha", true);
+        app.expecting_stop.insert("alpha".into());
+        app.handle_manager_event(ManagerEvent::ProcessExited {
+            project_name: "alpha".into(),
+        });
+        assert_eq!(app.projects[0].status, ProjectStatus::Stopped);
+        assert!(app.pending_restarts.is_empty());
+    }
+
+    #[test]
+    fn on_crash_schedules_restart_for_managed() {
+        let mut p = project("alpha", 1, "phoenix");
+        p.restart = RestartPolicy::OnCrash;
+        let mut app = app_with(vec![p]);
+        set_running(&mut app, "alpha", true);
+        app.projects[0].origin = Some(ProcessOrigin::Managed);
+        app.handle_manager_event(ManagerEvent::ProcessExited {
+            project_name: "alpha".into(),
+        });
+        assert!(matches!(app.projects[0].status, ProjectStatus::Failed(_)));
+        assert!(app.pending_restarts.contains_key("alpha"));
+        assert_eq!(app.crash_attempts.get("alpha").copied(), Some(1));
+    }
+
+    #[test]
+    fn on_crash_does_not_restart_adopted() {
+        let mut p = project("alpha", 1, "phoenix");
+        p.restart = RestartPolicy::OnCrash;
+        let mut app = app_with(vec![p]);
+        set_running(&mut app, "alpha", true);
+        app.projects[0].origin = Some(ProcessOrigin::Adopted);
+        app.handle_manager_event(ManagerEvent::ProcessExited {
+            project_name: "alpha".into(),
+        });
+        assert!(matches!(app.projects[0].status, ProjectStatus::Failed(_)));
+        assert!(app.pending_restarts.is_empty());
+    }
+
+    #[test]
+    fn on_crash_gives_up_after_max_attempts() {
+        let mut p = project("alpha", 1, "phoenix");
+        p.restart = RestartPolicy::OnCrash;
+        let mut app = app_with(vec![p]);
+        app.projects[0].origin = Some(ProcessOrigin::Managed);
+        for _ in 0..CRASH_RESTART_MAX {
+            set_running(&mut app, "alpha", true);
+            app.projects[0].origin = Some(ProcessOrigin::Managed);
+            app.pending_restarts.clear();
+            app.handle_manager_event(ManagerEvent::ProcessExited {
+                project_name: "alpha".into(),
+            });
+            assert!(app.pending_restarts.contains_key("alpha"));
+        }
+        set_running(&mut app, "alpha", true);
+        app.projects[0].origin = Some(ProcessOrigin::Managed);
+        app.pending_restarts.clear();
+        app.handle_manager_event(ManagerEvent::ProcessExited {
+            project_name: "alpha".into(),
+        });
+        assert!(app.pending_restarts.is_empty());
+        let msg = app.status_message.as_deref().unwrap_or("");
+        assert!(msg.contains("alpha"), "unexpected: {msg}");
+    }
+
+    #[tokio::test]
+    async fn user_stop_cancels_pending_restart() {
+        let mut p = project("alpha", 1, "phoenix");
+        p.restart = RestartPolicy::OnCrash;
+        let mut app = app_with(vec![p]);
+        set_running(&mut app, "alpha", true);
+        app.projects[0].origin = Some(ProcessOrigin::Managed);
+        app.handle_manager_event(ManagerEvent::ProcessExited {
+            project_name: "alpha".into(),
+        });
+        assert!(app.pending_restarts.contains_key("alpha"));
+        app.stop_project("alpha").await;
+        assert!(!app.pending_restarts.contains_key("alpha"));
     }
 }

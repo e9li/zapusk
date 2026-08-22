@@ -144,6 +144,7 @@ fn import_service(
         args,
         env: Default::default(),
         autostart: false,
+        restart: crate::core::config::RestartPolicy::Never,
         tls: false,
     });
 

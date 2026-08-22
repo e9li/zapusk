@@ -1,134 +1,92 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::app::{AddForm, App};
+use super::app::{App, FormField, ProjectForm};
 use crate::i18n::Msg;
 use crate::platform;
 
 impl App {
     /// Handle a keyboard event (dispatched from tick after Ctrl+C check)
     pub(crate) async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Add form input
-        if let Some(ref mut form) = self.add_form {
-            let is_selector_field = matches!(
-                form.field,
-                super::app::AddField::Type | super::app::AddField::Tls
-            );
+        // Add/edit form input
+        if self.form.is_some() {
+            let is_selector_field = self
+                .form
+                .as_ref()
+                .map(|f| f.is_selector_field())
+                .unwrap_or(false);
+            let field = self.form.as_ref().map(|f| f.field);
 
             match key.code {
                 KeyCode::Esc => {
-                    self.add_form = None;
+                    self.form = None;
                     self.status_message = Some(self.tr(Msg::Cancelled).into());
                 }
                 KeyCode::Enter => {
-                    let val = form.current_value().to_string();
-                    if val.is_empty()
-                        && matches!(
-                            form.field,
-                            super::app::AddField::Name | super::app::AddField::Path
-                        )
-                    {
-                        let field_msg = form.label_msg();
+                    let val = self
+                        .form
+                        .as_ref()
+                        .map(|f| f.current_value().to_string())
+                        .unwrap_or_default();
+                    if val.is_empty() && matches!(field, Some(FormField::Name | FormField::Path)) {
+                        let field_msg = self.form.as_ref().unwrap().label_msg();
                         let field = self.lang.tr(field_msg).to_string();
                         self.status_message = Some(self.trf(Msg::FieldEmpty, &[("field", &field)]));
                         return Ok(());
                     }
-                    if matches!(form.field, super::app::AddField::Path)
+                    if matches!(field, Some(FormField::Path))
                         && !std::path::Path::new(&val).is_dir()
                     {
                         self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &val)]));
+                        return Ok(());
+                    }
+                    if matches!(field, Some(FormField::PhpVersion))
+                        && val.trim().is_empty()
+                        && self.form.as_ref().map(|f| f.is_add()).unwrap_or(false)
+                    {
+                        self.status_message = Some(self.tr(Msg::PhpVersionEmpty).into());
                         return Ok(());
                     }
                     let tld = self.config.tld.clone();
-                    if form.next_field(&tld) {
-                        if let Some(completed) = self.add_form.take() {
-                            self.finalize_add(completed).await;
-                        }
-                    }
-                }
-                // Selector fields: type cycles, TLS toggles
-                KeyCode::Right | KeyCode::Tab if is_selector_field => {
-                    if matches!(form.field, super::app::AddField::Type) {
-                        form.cycle_type_next();
-                    } else {
-                        form.toggle_tls();
-                    }
-                }
-                KeyCode::Left | KeyCode::BackTab if is_selector_field => {
-                    if matches!(form.field, super::app::AddField::Type) {
-                        form.cycle_type_prev();
-                    } else {
-                        form.toggle_tls();
-                    }
-                }
-                // Other fields: freetext
-                KeyCode::Backspace if !is_selector_field => {
-                    form.current_value_mut().pop();
-                }
-                KeyCode::Char(c) if !is_selector_field => {
-                    form.current_value_mut().push(c);
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        // Edit form input
-        if let Some(ref mut form) = self.edit_form {
-            let is_selector_field = matches!(
-                form.field,
-                super::app::AddField::Type | super::app::AddField::Tls
-            );
-
-            match key.code {
-                KeyCode::Esc => {
-                    self.edit_form = None;
-                    self.status_message = Some(self.tr(Msg::Cancelled).into());
-                }
-                KeyCode::Enter => {
-                    let val = form.current_value().to_string();
-                    if val.is_empty()
-                        && matches!(
-                            form.field,
-                            super::app::AddField::Name | super::app::AddField::Path
-                        )
-                    {
-                        let field_msg = form.label_msg();
-                        let field = self.lang.tr(field_msg).to_string();
-                        self.status_message = Some(self.trf(Msg::FieldEmpty, &[("field", &field)]));
-                        return Ok(());
-                    }
-                    if matches!(form.field, super::app::AddField::Path)
-                        && !std::path::Path::new(&val).is_dir()
-                    {
-                        self.status_message = Some(self.trf(Msg::DirNotFound, &[("path", &val)]));
-                        return Ok(());
-                    }
-                    if form.next_field() {
-                        if let Some(completed) = self.edit_form.take() {
-                            self.finalize_edit(completed).await;
+                    let done = {
+                        let form = self.form.as_mut().unwrap();
+                        form.next_field(&tld, &self.frameworks)
+                    };
+                    if done {
+                        if let Some(completed) = self.form.take() {
+                            self.finalize_form(completed).await;
                         }
                     }
                 }
                 KeyCode::Right | KeyCode::Tab if is_selector_field => {
-                    if matches!(form.field, super::app::AddField::Type) {
-                        form.cycle_type_next();
-                    } else {
-                        form.toggle_tls();
+                    if let Some(form) = self.form.as_mut() {
+                        if matches!(form.field, FormField::Type) {
+                            form.cycle_type_next();
+                            form.apply_type_defaults(&self.frameworks);
+                        } else {
+                            form.toggle_current_selector();
+                        }
                     }
                 }
                 KeyCode::Left | KeyCode::BackTab if is_selector_field => {
-                    if matches!(form.field, super::app::AddField::Type) {
-                        form.cycle_type_prev();
-                    } else {
-                        form.toggle_tls();
+                    if let Some(form) = self.form.as_mut() {
+                        if matches!(form.field, FormField::Type) {
+                            form.cycle_type_prev();
+                            form.apply_type_defaults(&self.frameworks);
+                        } else {
+                            form.toggle_current_selector();
+                        }
                     }
                 }
                 KeyCode::Backspace if !is_selector_field => {
-                    form.current_value_mut().pop();
+                    if let Some(form) = self.form.as_mut() {
+                        form.current_value_mut().pop();
+                    }
                 }
                 KeyCode::Char(c) if !is_selector_field => {
-                    form.current_value_mut().push(c);
+                    if let Some(form) = self.form.as_mut() {
+                        form.current_value_mut().push(c);
+                    }
                 }
                 _ => {}
             }
@@ -285,8 +243,7 @@ impl App {
 
             // Add project
             KeyCode::Char('a') => {
-                self.edit_form = None;
-                self.add_form = Some(AddForm::new(self.frameworks.ids()));
+                self.form = Some(ProjectForm::new_add(self.frameworks.ids()));
                 self.status_message = Some(self.tr(Msg::AddingProject).into());
             }
 

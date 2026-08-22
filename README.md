@@ -34,13 +34,15 @@ Built-in recipes (shipped in the binary):
 | **Axum** | `cargo run` |
 | **Compose** | `docker compose up` (foreground) — the whole stack (app, db, redis, …) runs in containers |
 
-Add more types without recompiling: drop a TOML recipe in `~/.config/zapusk/frameworks/`. Ready-made examples for **Rails**, **Laravel**, and **Express** are in [`frameworks.example/`](frameworks.example/).
+Add more types without recompiling: drop a TOML recipe in `~/.config/zapusk/frameworks/`, or scaffold one:
 
 ```bash
-mkdir -p ~/.config/zapusk/frameworks
-cp frameworks.example/rails.toml ~/.config/zapusk/frameworks/
-# then in config.toml:  type = "rails"
+zapusk recipe init rails      # bundled example (also laravel, express)
+zapusk recipe init nextjs     # commented skeleton
+# then type = "rails" in config.toml, or press `a` in the TUI
 ```
+
+Ready-made examples also live in [`frameworks.example/`](frameworks.example/) if you prefer to copy from git.
 
 The design is intentionally stack-agnostic — anything that binds to a port can be a recipe. Caddy proxies it; `zapusk` manages the process.
 
@@ -191,6 +193,7 @@ src/
     ├── doctor.rs     # `zapusk doctor` — dependency checks
     ├── init.rs       # `zapusk init` — interactive first-run setup
     ├── add.rs        # `zapusk add` — add project interactively
+    ├── recipe.rs     # `zapusk recipe init` — scaffold a user recipe
     ├── destroy.rs    # `zapusk destroy` — remove all zapusk configuration
     ├── discover.rs   # `zapusk discover` — list unmanaged listening apps
     └── completions.rs # `zapusk completions` — clap shell scripts
@@ -207,6 +210,7 @@ zapusk              # open TUI
 zapusk init         # interactive first-run setup
 zapusk doctor       # check all dependencies
 zapusk add          # add a project to config interactively
+zapusk recipe init ID  # scaffold ~/.config/zapusk/frameworks/<id>.toml
 zapusk start NAME   # start a project (same manager as the TUI)
 zapusk stop NAME
 zapusk restart NAME
@@ -524,13 +528,17 @@ cwd_contains = ["config/application.rb"]
 
 Unknown hook names and unknown Caddy profiles are rejected when the file is loaded (`zapusk doctor` lists the error). Recipes cannot embed raw Caddy snippets or shell scripts.
 
-Copy the samples:
+Scaffold a user recipe (no git checkout needed):
 
 ```bash
-cp frameworks.example/rails.toml ~/.config/zapusk/frameworks/
-cp frameworks.example/laravel.toml ~/.config/zapusk/frameworks/
-cp frameworks.example/express.toml ~/.config/zapusk/frameworks/
+zapusk recipe init rails
+zapusk recipe init laravel
+zapusk recipe init express
+zapusk recipe init nextjs          # skeleton
+zapusk recipe init rails --force   # overwrite
 ```
+
+The TUI reloads `~/.config/zapusk/frameworks/` while it is open, so the new type shows up in `a` immediately.
 
 ## Config reference
 
@@ -698,8 +706,22 @@ second. Saving the file in an editor updates the project list:
 - Domain / TLS / alias changes regenerate the Caddyfile
 - Invalid TOML keeps the current list and shows the parse error
 - Reloads wait if the add/edit form or a confirm dialog is open
-- Adding a **framework recipe** still needs a TUI restart (the recipe registry
-  is loaded at startup)
+- Dropping or editing a file in `~/.config/zapusk/frameworks/` reloads the
+  recipe list. The type picker in `a` updates immediately. A running process
+  keeps its current start spec until the next `s`. Invalid recipe TOML is
+  reported in the status bar and the last good spec is kept.
+
+## Crash restart
+
+If a managed process dies while the TUI is open, the project shows **failed**.
+Set `restart = "on-crash"` on a project to have the TUI start it again (1s / 2s
+/ 4s backoff, up to 3 attempts). This is not a file-watcher: saving source
+does not restart the process. Adopted processes are never auto-restarted.
+User `x` / `q` / `Q` always stop without treating the exit as a crash.
+
+The add/edit form covers the daily fields (`php_version`, `autostart`,
+`restart`, compose file/service/profiles). `command`, `args`, `env`, and
+`public_dir` stay in `config.toml`.
 
 ## Shell completions
 

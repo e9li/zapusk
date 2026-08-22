@@ -1,7 +1,4 @@
-# Laravel — copy to ~/.config/zapusk/frameworks/laravel.toml
-#
-#   mkdir -p ~/.config/zapusk/frameworks
-#   cp frameworks.example/laravel.toml ~/.config/zapusk/frameworks/
+# Laravel — `zapusk recipe init laravel`
 #
 # Then in config.toml:
 #   type = "laravel"

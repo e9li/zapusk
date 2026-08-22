@@ -17,6 +17,77 @@ const BUILTIN_TOMLS: &[(&str, &str)] = &[
     ("compose", include_str!("../frameworks/compose.toml")),
 ];
 
+/// Opt-in extras for `zapusk recipe init`. Not auto-loaded.
+const EXAMPLE_TOMLS: &[(&str, &str)] = &[
+    ("rails", include_str!("../../frameworks.example/rails.toml")),
+    (
+        "laravel",
+        include_str!("../../frameworks.example/laravel.toml"),
+    ),
+    (
+        "express",
+        include_str!("../../frameworks.example/express.toml"),
+    ),
+];
+
+pub fn example_ids() -> Vec<&'static str> {
+    EXAMPLE_TOMLS.iter().map(|(id, _)| *id).collect()
+}
+
+pub fn example_toml(id: &str) -> Option<&'static str> {
+    EXAMPLE_TOMLS
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map(|(_, src)| *src)
+}
+
+/// Commented skeleton for an unknown id. Must parse as a `FrameworkSpec`.
+pub fn recipe_skeleton(id: &str) -> String {
+    format!(
+        r#"# Skeleton from `zapusk recipe init {id}`.
+# Placeholders: {{port}} {{path}} {{domain}} {{name}} {{php_version}} {{public_dir}} {{root}} {{php}}
+# Edit start.command, then set type = "{id}" on a project (or press `a`).
+
+id = "{id}"
+
+[start]
+command = "your-server"
+args = ["--port", "{{port}}"]
+
+# [env]
+# KEY = "value"
+
+[lifecycle]
+kind = "native"
+ready_attempts = 8
+
+[caddy]
+profile = "proxy"
+# root = "{{root}}"
+# block_paths = ["/.*"]
+
+# [hooks]
+# sync_php_version = false
+# resolve_php_binary = false
+# require_php = false
+
+[doctor]
+binaries = []
+marker_files = []
+
+[discovery]
+command_contains = []
+"#
+    )
+}
+
+/// Example TOML if `id` is rails/laravel/express, otherwise a skeleton.
+pub fn recipe_contents(id: &FrameworkId) -> String {
+    example_toml(id.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| recipe_skeleton(id.as_str()))
+}
+
 /// Newtype around a framework recipe id (`phoenix`, `rails`, …).
 /// Stored as a plain string in `config.toml` (`type = "phoenix"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -271,6 +342,17 @@ pub struct FrameworkRegistry {
 impl FrameworkRegistry {
     /// Builtins + user directory. Never fails: bad user files become warnings.
     pub fn load() -> Self {
+        Self::load_from(&frameworks_dir())
+    }
+
+    /// Re-read the user recipe directory. If a previously loaded user file now
+    /// fails to parse, keep the last good spec so a typo does not drop a type
+    /// from the live TUI.
+    pub fn reload(&self) -> Self {
+        Self::load().preserve_broken_user_files(self)
+    }
+
+    fn load_from(user_dir: &Path) -> Self {
         let mut specs = HashMap::new();
         let mut sources = HashMap::new();
         let mut builtin_order = Vec::new();
@@ -299,7 +381,43 @@ impl FrameworkRegistry {
             }
         }
 
-        load_user_dir(&frameworks_dir(), &mut specs, &mut sources, &mut warnings);
+        load_user_dir(user_dir, &mut specs, &mut sources, &mut warnings);
+
+        Self {
+            inner: Arc::new(RegistryInner {
+                specs,
+                sources,
+                builtin_order,
+                warnings,
+            }),
+        }
+    }
+
+    fn preserve_broken_user_files(self, previous: &Self) -> Self {
+        let mut specs = self.inner.specs.clone();
+        let mut sources = self.inner.sources.clone();
+        let mut warnings = self.inner.warnings.clone();
+        let builtin_order = self.inner.builtin_order.clone();
+
+        for (id, source) in &previous.inner.sources {
+            let FrameworkSource::User(path) = source else {
+                continue;
+            };
+            let path_s = path.display().to_string();
+            let broken = self.inner.warnings.iter().any(|w| w.contains(&path_s));
+            if !broken {
+                continue;
+            }
+            if let Some(spec) = previous.inner.specs.get(id) {
+                specs.insert(id.clone(), spec.clone());
+                sources.insert(id.clone(), source.clone());
+                warnings.push(format!(
+                    "{}: keeping last good spec for '{}'",
+                    path.display(),
+                    id
+                ));
+            }
+        }
 
         Self {
             inner: Arc::new(RegistryInner {
@@ -414,7 +532,7 @@ impl FrameworkRegistry {
     }
 }
 
-fn parse_spec(toml_src: &str) -> Result<FrameworkSpec> {
+pub(crate) fn parse_spec(toml_src: &str) -> Result<FrameworkSpec> {
     let spec: FrameworkSpec = toml::from_str(toml_src).context("invalid framework TOML")?;
     if spec.id.trim().is_empty() {
         bail!("framework spec is missing `id`");
@@ -479,6 +597,39 @@ pub fn frameworks_dir() -> PathBuf {
         .parent()
         .map(|p| p.join("frameworks"))
         .unwrap_or_else(|| PathBuf::from("frameworks"))
+}
+
+/// Fingerprint of user recipe files (path + mtime + len). Directory mtime
+/// alone misses in-place edits. Missing dir → 0.
+pub fn user_dir_fingerprint() -> u64 {
+    fingerprint_dir(&frameworks_dir())
+}
+
+pub fn fingerprint_dir(dir: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("toml"))
+            .collect(),
+        Err(_) => return 0,
+    };
+    files.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for path in files {
+        path.hash(&mut hasher);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            meta.len().hash(&mut hasher);
+            if let Ok(mtime) = meta.modified() {
+                mtime.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 pub fn ensure_frameworks_dir() -> Result<PathBuf> {
@@ -573,6 +724,7 @@ mod tests {
             args: vec![],
             env: Default::default(),
             autostart: false,
+            restart: crate::core::config::RestartPolicy::Never,
             tls: false,
         }
     }
@@ -760,20 +912,92 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_changes_on_add_edit_delete() {
+        let dir = std::env::temp_dir().join(format!(
+            "zapusk-fw-fp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = fingerprint_dir(&dir);
+        assert_eq!(fingerprint_dir(&dir.join("missing")), 0);
+
+        std::fs::write(dir.join("rails.toml"), "id = \"rails\"\n").unwrap();
+        let added = fingerprint_dir(&dir);
+        assert_ne!(empty, added);
+
+        std::fs::write(dir.join("rails.toml"), "id = \"rails\"\n# edited\n").unwrap();
+        let edited = fingerprint_dir(&dir);
+        assert_ne!(added, edited);
+
+        std::fs::remove_file(dir.join("rails.toml")).unwrap();
+        let deleted = fingerprint_dir(&dir);
+        assert_eq!(deleted, empty);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reload_keeps_last_good_user_spec_on_parse_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "zapusk-fw-keep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("rails.toml"),
+            r#"
+            id = "rails"
+            [start]
+            command = "bin/rails"
+            args = ["server"]
+            "#,
+        )
+        .unwrap();
+
+        let first = FrameworkRegistry::load_from(&dir);
+        assert!(first.contains("rails"));
+        assert_eq!(first.get_str("rails").unwrap().start.command, "bin/rails");
+
+        std::fs::write(dir.join("rails.toml"), "this is not valid toml [[[").unwrap();
+        let second = FrameworkRegistry::load_from(&dir).preserve_broken_user_files(&first);
+        assert!(second.contains("rails"));
+        assert_eq!(second.get_str("rails").unwrap().start.command, "bin/rails");
+        assert!(
+            second
+                .warnings()
+                .iter()
+                .any(|w| w.contains("keeping last good spec"))
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn example_recipes_parse() {
-        for (name, src) in [
-            ("rails", include_str!("../../frameworks.example/rails.toml")),
-            (
-                "laravel",
-                include_str!("../../frameworks.example/laravel.toml"),
-            ),
-            (
-                "express",
-                include_str!("../../frameworks.example/express.toml"),
-            ),
-        ] {
+        assert_eq!(example_ids(), vec!["rails", "laravel", "express"]);
+        for (name, src) in EXAMPLE_TOMLS {
             let spec = parse_spec(src).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(spec.id, name);
+            assert_eq!(spec.id, *name);
+            assert_eq!(example_toml(name), Some(*src));
         }
+        assert!(example_toml("phoenix").is_none());
+    }
+
+    #[test]
+    fn recipe_skeleton_parses_with_requested_id() {
+        let src = recipe_skeleton("nextjs");
+        let spec = parse_spec(&src).expect("skeleton must parse");
+        assert_eq!(spec.id, "nextjs");
+        assert_eq!(spec.start.command, "your-server");
+        assert_eq!(recipe_contents(&FrameworkId::new("nextjs")), src);
+        assert!(recipe_contents(&FrameworkId::new("rails")).contains("id = \"rails\""));
     }
 }

@@ -1,7 +1,4 @@
-# Express / generic Node — copy to ~/.config/zapusk/frameworks/express.toml
-#
-#   mkdir -p ~/.config/zapusk/frameworks
-#   cp frameworks.example/express.toml ~/.config/zapusk/frameworks/
+# Express / generic Node — `zapusk recipe init express`
 #
 # Then in config.toml:
 #   type = "express"

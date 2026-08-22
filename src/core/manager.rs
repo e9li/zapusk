@@ -21,7 +21,7 @@ pub enum ManagerEvent {
         is_stderr: bool,
     },
     /// Process exited
-    ProcessExited { project_name: String, success: bool },
+    ProcessExited { project_name: String },
     /// Process confirmed running
     ProcessStarted {
         project_name: String,
@@ -90,6 +90,10 @@ impl Manager {
     pub fn forget(&mut self, name: &str) {
         self.spawned.remove(name);
         self.adopted.remove(name);
+    }
+
+    pub fn replace_registry(&mut self, frameworks: FrameworkRegistry) {
+        self.frameworks = frameworks;
     }
 
     #[cfg(test)]
@@ -286,24 +290,12 @@ impl Manager {
         let tx_exit = tx.clone();
         let name_exit = name.clone();
         tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => {
-                    let _ = tx_exit
-                        .send(ManagerEvent::ProcessExited {
-                            project_name: name_exit,
-                            success: status.success(),
-                        })
-                        .await;
-                }
-                Err(_) => {
-                    let _ = tx_exit
-                        .send(ManagerEvent::ProcessExited {
-                            project_name: name_exit,
-                            success: false,
-                        })
-                        .await;
-                }
-            }
+            let _ = child.wait().await;
+            let _ = tx_exit
+                .send(ManagerEvent::ProcessExited {
+                    project_name: name_exit,
+                })
+                .await;
         });
 
         self.spawned.insert(
@@ -354,11 +346,10 @@ impl Manager {
         let tx_exit = tx.clone();
         let name_exit = name.clone();
         tokio::spawn(async move {
-            let success = matches!(child.wait().await, Ok(status) if status.success());
+            let _ = child.wait().await;
             let _ = tx_exit
                 .send(ManagerEvent::ProcessExited {
                     project_name: name_exit,
-                    success,
                 })
                 .await;
         });
@@ -402,7 +393,6 @@ impl Manager {
                 adopted_exited.push(name.clone());
                 events.push(ManagerEvent::ProcessExited {
                     project_name: name.clone(),
-                    success: true,
                 });
             }
         }

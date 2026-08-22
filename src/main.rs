@@ -90,6 +90,23 @@ enum Commands {
         /// Project name from config.toml
         name: String,
     },
+    /// Scaffold a user recipe TOML
+    Recipe {
+        #[command(subcommand)]
+        command: RecipeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RecipeCommand {
+    /// Write a recipe into ~/.config/zapusk/frameworks/
+    Init {
+        /// rails, laravel, express, or a new id
+        id: Option<String>,
+        /// Overwrite an existing user file
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -110,6 +127,9 @@ async fn main() -> Result<()> {
             cli::lifecycle::status(name.as_deref(), json).await
         }
         Some(Commands::Open { name }) => cli::lifecycle::open(&name),
+        Some(Commands::Recipe { command }) => match command {
+            RecipeCommand::Init { id, force } => cli::recipe::run(id, force),
+        },
         None => run_tui().await,
     }
 }
@@ -260,6 +280,30 @@ mod tests {
         let open = Cli::try_parse_from(["zapusk", "open", "blog"]).unwrap();
         match open.command {
             Some(Commands::Open { name }) => assert_eq!(name, "blog"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_recipe_init() {
+        let cli = Cli::try_parse_from(["zapusk", "recipe", "init", "rails", "--force"]).unwrap();
+        match cli.command {
+            Some(Commands::Recipe {
+                command: RecipeCommand::Init { id, force },
+            }) => {
+                assert_eq!(id.as_deref(), Some("rails"));
+                assert!(force);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let bare = Cli::try_parse_from(["zapusk", "recipe", "init"]).unwrap();
+        match bare.command {
+            Some(Commands::Recipe {
+                command: RecipeCommand::Init { id, force },
+            }) => {
+                assert!(id.is_none());
+                assert!(!force);
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

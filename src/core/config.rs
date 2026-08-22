@@ -97,9 +97,32 @@ pub struct ProjectConfig {
     /// Start this project automatically when zapusk launches
     #[serde(default, skip_serializing_if = "is_false")]
     pub autostart: bool,
+    /// What to do if a managed process dies while the TUI is open.
+    /// `on-crash` restarts with backoff (TUI only; not a file-watcher).
+    #[serde(default, skip_serializing_if = "RestartPolicy::is_never")]
+    pub restart: RestartPolicy,
     /// Enable TLS via Caddy (uses `tls internal` for local certs)
     #[serde(default, skip_serializing_if = "is_false")]
     pub tls: bool,
+}
+
+/// Per-project crash policy. Default is never — user `x` / `q` always stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    #[default]
+    Never,
+    OnCrash,
+}
+
+impl RestartPolicy {
+    pub fn is_never(&self) -> bool {
+        matches!(self, Self::Never)
+    }
+
+    pub fn is_on_crash(&self) -> bool {
+        matches!(self, Self::OnCrash)
+    }
 }
 
 fn is_false(v: &bool) -> bool {
@@ -362,6 +385,23 @@ mod tests {
         assert_eq!(project.compose_file, None);
         assert_eq!(project.service, None);
         assert!(project.compose_profiles.is_empty());
+        assert_eq!(project.restart, RestartPolicy::Never);
+    }
+
+    #[test]
+    fn parses_restart_on_crash() {
+        let project = parse_project(
+            r#"
+            [[projects]]
+            name = "api"
+            domain = "api.test"
+            port = 3000
+            type = "axum"
+            path = "/tmp/api"
+            restart = "on-crash"
+            "#,
+        );
+        assert_eq!(project.restart, RestartPolicy::OnCrash);
     }
 
     #[test]

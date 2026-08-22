@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use super::app::{ActivePane, AddField, AddForm, App, ConfirmAction, EditForm, ServiceState};
+use super::app::{ActivePane, App, ConfirmAction, FormField, FormMode, ProjectForm, ServiceState};
 use super::theme::t;
 use crate::core::discovery::ServiceInfo;
 use crate::core::project::{ProcessOrigin, Project, ProjectStatus};
@@ -212,11 +212,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.show_theme_popup {
         draw_theme_picker(frame, app);
     }
-    if let Some(form) = &app.add_form {
-        draw_add_form(frame, app, form);
-    }
-    if let Some(form) = &app.edit_form {
-        draw_edit_form(frame, app, form);
+    if let Some(form) = &app.form {
+        draw_project_form(frame, app, form);
     }
     if let Some(dialog) = &app.confirm_dialog {
         draw_confirm_dialog(frame, app, dialog.action.clone());
@@ -353,7 +350,7 @@ fn draw_shortcuts_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("r", app.tr(Msg::ActionRefresh)),
             ("esc", app.tr(Msg::ActionClose)),
         ]
-    } else if app.add_form.is_some() || app.edit_form.is_some() {
+    } else if app.form.is_some() {
         vec![
             ("enter", app.tr(Msg::HintSelect)),
             ("esc", app.tr(Msg::ActionClose)),
@@ -605,6 +602,13 @@ fn draw_project_details(frame: &mut Frame, app: &App, area: Rect) {
             app.tr(Msg::LabelAutostart),
             app.tr(Msg::Yes),
             t().ok,
+        ));
+    }
+    if cfg.restart.is_on_crash() {
+        lines.push(detail_row(
+            app.tr(Msg::LabelRestart),
+            app.tr(Msg::RestartOnCrash),
+            t().warn,
         ));
     }
 
@@ -978,46 +982,13 @@ fn help_line<'a>(key: &'a str, desc: &'a str, key_style: Style, desc_style: Styl
     ])
 }
 
-// ── Add form popup ─────────────────────────────────────────────────────────
+// ── Project form popup ─────────────────────────────────────────────────────
 
-fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
-    let area = centered_rect(60, 50, frame.area());
+fn draw_project_form(frame: &mut Frame, app: &App, form: &ProjectForm) {
+    let area = centered_rect(70, 75, frame.area());
     frame.render_widget(Clear, area);
 
-    let type_active = matches!(form.field, AddField::Type);
-    let tls_active = matches!(form.field, AddField::Tls);
-
-    let text_fields: &[(&str, &str, bool)] = &[
-        (
-            app.tr(Msg::LabelName),
-            &form.name,
-            matches!(form.field, AddField::Name),
-        ),
-        (
-            app.tr(Msg::LabelDomain),
-            &form.domain,
-            matches!(form.field, AddField::Domain),
-        ),
-        (
-            app.tr(Msg::LabelAliases),
-            &form.aliases,
-            matches!(form.field, AddField::Aliases),
-        ),
-        (
-            app.tr(Msg::LabelPort),
-            &form.port,
-            matches!(form.field, AddField::Port),
-        ),
-        (
-            app.tr(Msg::LabelUpstream),
-            &form.upstream_host,
-            matches!(form.field, AddField::UpstreamHost),
-        ),
-    ];
-
-    let mut lines = vec![Line::from("")];
-
-    for &(label, value, active) in text_fields {
+    fn push_text(lines: &mut Vec<Line>, label: &str, value: &str, active: bool) {
         let (label_color, value_str) = if active {
             (t().accent, format!("{}\u{2588}", value))
         } else if value.is_empty() {
@@ -1025,78 +996,184 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
         } else {
             (t().text_dim, value.to_string())
         };
-
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10}", label), Style::default().fg(label_color)),
+            Span::styled(format!("  {:<12}", label), Style::default().fg(label_color)),
             Span::styled(value_str, Style::default().fg(t().text)),
         ]));
     }
 
-    // Type selector
-    let label_color = if type_active {
-        t().accent
-    } else {
-        t().text_dim
-    };
-    let mut type_spans = vec![Span::styled(
-        format!("  {:<10}", app.tr(Msg::LabelType)),
-        Style::default().fg(label_color),
-    )];
-    let options = &form.type_ids;
-    for (i, opt) in options.iter().enumerate() {
-        if i == form.type_index {
-            type_spans.push(Span::styled(
-                format!(" {} ", opt),
-                Style::default().fg(Color::Black).bg(t().accent),
-            ));
-        } else {
-            type_spans.push(Span::styled(
-                format!(" {} ", opt),
-                Style::default().fg(if type_active { t().text } else { t().text_dim }),
-            ));
+    fn push_toggle(
+        lines: &mut Vec<Line>,
+        label: &str,
+        on: bool,
+        active: bool,
+        on_label: &str,
+        off_label: &str,
+    ) {
+        let label_color = if active { t().accent } else { t().text_dim };
+        let mut spans = vec![Span::styled(
+            format!("  {:<12}", label),
+            Style::default().fg(label_color),
+        )];
+        for (is_on, text) in [(false, off_label), (true, on_label)] {
+            if on == is_on {
+                spans.push(Span::styled(
+                    format!(" {} ", text),
+                    Style::default().fg(Color::Black).bg(t().accent),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {} ", text),
+                    Style::default().fg(if active { t().text } else { t().text_dim }),
+                ));
+            }
         }
+        lines.push(Line::from(spans));
     }
-    lines.push(Line::from(type_spans));
 
-    // TLS selector
-    let tls_label_color = if tls_active { t().accent } else { t().text_dim };
-    let mut tls_spans = vec![Span::styled(
-        format!("  {:<10}", app.tr(Msg::LabelTls)),
-        Style::default().fg(tls_label_color),
-    )];
-    for (is_on, label) in [(false, "off"), (true, "on")] {
-        if form.tls == is_on {
-            tls_spans.push(Span::styled(
-                format!(" {} ", label),
-                Style::default().fg(Color::Black).bg(t().accent),
-            ));
+    let mut lines = vec![Line::from("")];
+    let fw = &app.frameworks;
+
+    if form.field_visible(FormField::Name, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelName),
+            &form.name,
+            form.field == FormField::Name,
+        );
+    }
+    if form.field_visible(FormField::Domain, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelDomain),
+            &form.domain,
+            form.field == FormField::Domain,
+        );
+    }
+    if form.field_visible(FormField::Aliases, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelAliases),
+            &form.aliases,
+            form.field == FormField::Aliases,
+        );
+    }
+    if form.field_visible(FormField::Port, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelPort),
+            &form.port,
+            form.field == FormField::Port,
+        );
+    }
+    if form.field_visible(FormField::UpstreamHost, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelUpstream),
+            &form.upstream_host,
+            form.field == FormField::UpstreamHost,
+        );
+    }
+
+    if form.field_visible(FormField::Type, fw) {
+        let type_active = form.field == FormField::Type;
+        let label_color = if type_active {
+            t().accent
         } else {
-            tls_spans.push(Span::styled(
-                format!(" {} ", label),
-                Style::default().fg(if tls_active { t().text } else { t().text_dim }),
-            ));
+            t().text_dim
+        };
+        let mut type_spans = vec![Span::styled(
+            format!("  {:<12}", app.tr(Msg::LabelType)),
+            Style::default().fg(label_color),
+        )];
+        for (i, opt) in form.type_ids.iter().enumerate() {
+            if i == form.type_index {
+                type_spans.push(Span::styled(
+                    format!(" {} ", opt),
+                    Style::default().fg(Color::Black).bg(t().accent),
+                ));
+            } else {
+                type_spans.push(Span::styled(
+                    format!(" {} ", opt),
+                    Style::default().fg(if type_active { t().text } else { t().text_dim }),
+                ));
+            }
         }
+        lines.push(Line::from(type_spans));
     }
-    lines.push(Line::from(tls_spans));
 
-    // Path field
-    let path_active = matches!(form.field, AddField::Path);
-    let (path_label_color, path_str) = if path_active {
-        (t().accent, format!("{}\u{2588}", form.path))
-    } else if form.path.is_empty() {
-        (t().text_dim, "-".into())
-    } else {
-        (t().text_dim, form.path.clone())
-    };
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("  {:<10}", app.tr(Msg::LabelDirectory)),
-            Style::default().fg(path_label_color),
-        ),
-        Span::styled(path_str, Style::default().fg(t().text)),
-    ]));
+    if form.field_visible(FormField::Tls, fw) {
+        push_toggle(
+            &mut lines,
+            app.tr(Msg::LabelTls),
+            form.tls,
+            form.field == FormField::Tls,
+            "on",
+            "off",
+        );
+    }
+    if form.field_visible(FormField::Autostart, fw) {
+        push_toggle(
+            &mut lines,
+            app.tr(Msg::LabelAutostart),
+            form.autostart,
+            form.field == FormField::Autostart,
+            "on",
+            "off",
+        );
+    }
+    if form.field_visible(FormField::Restart, fw) {
+        push_toggle(
+            &mut lines,
+            app.tr(Msg::LabelRestart),
+            form.restart,
+            form.field == FormField::Restart,
+            app.tr(Msg::RestartOnCrash),
+            app.tr(Msg::RestartNever),
+        );
+    }
+    if form.field_visible(FormField::PhpVersion, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelPhp),
+            &form.php_version,
+            form.field == FormField::PhpVersion,
+        );
+    }
+    if form.field_visible(FormField::ComposeFile, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelComposeFile),
+            &form.compose_file,
+            form.field == FormField::ComposeFile,
+        );
+    }
+    if form.field_visible(FormField::Service, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelService),
+            &form.service,
+            form.field == FormField::Service,
+        );
+    }
+    if form.field_visible(FormField::Profiles, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelProfiles),
+            &form.profiles,
+            form.field == FormField::Profiles,
+        );
+    }
+    if form.field_visible(FormField::Path, fw) {
+        push_text(
+            &mut lines,
+            app.tr(Msg::LabelDirectory),
+            &form.path,
+            form.field == FormField::Path,
+        );
+    }
 
-    if let Some(error) = app.add_form_error(form) {
+    if let Some(error) = app.form_error(form) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  ! {}", error),
@@ -1105,7 +1182,7 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
     }
 
     lines.push(Line::from(""));
-    let hint = if type_active || tls_active {
+    let hint = if form.is_selector_field() {
         app.tr(Msg::FormHintSelect)
     } else {
         app.tr(Msg::FormHintText)
@@ -1114,153 +1191,17 @@ fn draw_add_form(frame: &mut Frame, app: &App, form: &AddForm) {
         hint,
         Style::default().fg(t().text_dim),
     )));
-
-    let popup = Paragraph::new(lines)
-        .block(make_popup_block(app.tr(Msg::AddProject)))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(popup, area);
-}
-
-// ── Edit form popup ────────────────────────────────────────────────────────
-
-fn draw_edit_form(frame: &mut Frame, app: &App, form: &EditForm) {
-    let area = centered_rect(60, 50, frame.area());
-    frame.render_widget(Clear, area);
-
-    let type_active = matches!(form.field, AddField::Type);
-    let tls_active = matches!(form.field, AddField::Tls);
-
-    let text_fields: &[(&str, &str, bool)] = &[
-        (
-            app.tr(Msg::LabelName),
-            &form.name,
-            matches!(form.field, AddField::Name),
-        ),
-        (
-            app.tr(Msg::LabelDomain),
-            &form.domain,
-            matches!(form.field, AddField::Domain),
-        ),
-        (
-            app.tr(Msg::LabelAliases),
-            &form.aliases,
-            matches!(form.field, AddField::Aliases),
-        ),
-        (
-            app.tr(Msg::LabelPort),
-            &form.port,
-            matches!(form.field, AddField::Port),
-        ),
-        (
-            app.tr(Msg::LabelUpstream),
-            &form.upstream_host,
-            matches!(form.field, AddField::UpstreamHost),
-        ),
-    ];
-
-    let mut lines = vec![Line::from("")];
-
-    for &(label, value, active) in text_fields {
-        let (label_color, value_str) = if active {
-            (t().accent, format!("{}\u{2588}", value))
-        } else if value.is_empty() {
-            (t().text_dim, "-".into())
-        } else {
-            (t().text_dim, value.to_string())
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10}", label), Style::default().fg(label_color)),
-            Span::styled(value_str, Style::default().fg(t().text)),
-        ]));
-    }
-
-    // Type selector
-    let label_color = if type_active {
-        t().accent
-    } else {
-        t().text_dim
-    };
-    let mut type_spans = vec![Span::styled(
-        format!("  {:<10}", app.tr(Msg::LabelType)),
-        Style::default().fg(label_color),
-    )];
-    let options = &form.type_ids;
-    for (i, opt) in options.iter().enumerate() {
-        if i == form.type_index {
-            type_spans.push(Span::styled(
-                format!(" {} ", opt),
-                Style::default().fg(Color::Black).bg(t().accent),
-            ));
-        } else {
-            type_spans.push(Span::styled(
-                format!(" {} ", opt),
-                Style::default().fg(if type_active { t().text } else { t().text_dim }),
-            ));
-        }
-    }
-    lines.push(Line::from(type_spans));
-
-    // TLS selector
-    let tls_label_color = if tls_active { t().accent } else { t().text_dim };
-    let mut tls_spans = vec![Span::styled(
-        format!("  {:<10}", app.tr(Msg::LabelTls)),
-        Style::default().fg(tls_label_color),
-    )];
-    for (is_on, label) in [(false, "off"), (true, "on")] {
-        if form.tls == is_on {
-            tls_spans.push(Span::styled(
-                format!(" {} ", label),
-                Style::default().fg(Color::Black).bg(t().accent),
-            ));
-        } else {
-            tls_spans.push(Span::styled(
-                format!(" {} ", label),
-                Style::default().fg(if tls_active { t().text } else { t().text_dim }),
-            ));
-        }
-    }
-    lines.push(Line::from(tls_spans));
-
-    // Path field
-    let path_active = matches!(form.field, AddField::Path);
-    let (path_label_color, path_str) = if path_active {
-        (t().accent, format!("{}\u{2588}", form.path))
-    } else if form.path.is_empty() {
-        (t().text_dim, "-".into())
-    } else {
-        (t().text_dim, form.path.clone())
-    };
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("  {:<10}", app.tr(Msg::LabelDirectory)),
-            Style::default().fg(path_label_color),
-        ),
-        Span::styled(path_str, Style::default().fg(t().text)),
-    ]));
-
-    if let Some(error) = app.edit_form_error(form) {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("  ! {}", error),
-            Style::default().fg(t().err),
-        )));
-    }
-
-    lines.push(Line::from(""));
-    let hint = if type_active || tls_active {
-        app.tr(Msg::FormHintSelect)
-    } else {
-        app.tr(Msg::FormHintText)
-    };
     lines.push(Line::from(Span::styled(
-        hint,
+        format!("  {}", app.tr(Msg::FormConfigOnly)),
         Style::default().fg(t().text_dim),
     )));
 
+    let title = match form.mode {
+        FormMode::Add => app.tr(Msg::AddProject),
+        FormMode::Edit { .. } => app.tr(Msg::EditProject),
+    };
     let popup = Paragraph::new(lines)
-        .block(make_popup_block(app.tr(Msg::EditProject)))
+        .block(make_popup_block(title))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(popup, area);

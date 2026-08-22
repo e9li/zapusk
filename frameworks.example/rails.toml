@@ -1,7 +1,4 @@
-# Ruby on Rails — copy to ~/.config/zapusk/frameworks/rails.toml
-#
-#   mkdir -p ~/.config/zapusk/frameworks
-#   cp frameworks.example/rails.toml ~/.config/zapusk/frameworks/
+# Ruby on Rails — `zapusk recipe init rails`
 #
 # Then in config.toml:
 #   type = "rails"

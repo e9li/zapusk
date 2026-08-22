@@ -5,4 +5,5 @@ pub mod discover;
 pub mod doctor;
 pub mod init;
 pub mod lifecycle;
+pub mod recipe;
 pub mod spinner;

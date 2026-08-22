@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+- **Recipe live-reload**: dropping or editing `~/.config/zapusk/frameworks/*.toml`
+  updates the type list in `a` without restarting the TUI. Running processes
+  keep their current spec until the next start. A broken user file keeps the
+  last good spec.
+- **Crash status and optional restart**: unexpected process death (including
+  adopted) shows **failed**. `restart = "on-crash"` on a project restarts a
+  managed process with backoff (TUI only; not a file-watcher). User stop is
+  never treated as a crash.
+- **Add/edit form fields**: `autostart`, `restart`, `php_version` (PHP recipes),
+  and compose file/service/profiles. `command` / `args` / `env` / `public_dir`
+  stay config-only (shown as a form hint). `zapusk add` prompts for autostart
+  and compose profiles.
+- **`zapusk recipe init <id>`**: writes `~/.config/zapusk/frameworks/<id>.toml`.
+  Known ids (`rails`, `laravel`, `express`) copy the bundled example; any other
+  id gets a commented skeleton. `--force` overwrites. Live-reload picks it up
+  in `a` without restarting the TUI.
+
 ### Changed
 
 - Project domains and aliases must now end with the configured `tld` —

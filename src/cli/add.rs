@@ -58,7 +58,7 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    let (compose_file, service) = if spec.is_compose() {
+    let (compose_file, service, compose_profiles) = if spec.is_compose() {
         let file = prompt_with_default("Compose file (relative to project dir)", "auto-detect")?;
         let compose_file = if file == "auto-detect" {
             None
@@ -74,10 +74,14 @@ pub async fn run() -> Result<()> {
         } else {
             Some(service)
         };
-        (compose_file, service)
+        let profiles_raw = prompt_with_default("Compose profiles (comma-separated)", "")?;
+        let compose_profiles = parse_aliases(&profiles_raw);
+        (compose_file, service, compose_profiles)
     } else {
-        (None, None)
+        (None, None, vec![])
     };
+
+    let autostart = prompt_bool_with_default("Start automatically when zapusk launches", false)?;
 
     // Check for duplicates in existing config
     if let Ok(config) = Config::load() {
@@ -120,11 +124,12 @@ pub async fn run() -> Result<()> {
         command: None,
         compose_file,
         service,
-        compose_profiles: vec![],
+        compose_profiles,
         upstream_host: None,
         args: vec![],
         env: Default::default(),
-        autostart: false,
+        autostart,
+        restart: crate::core::config::RestartPolicy::Never,
         tls,
     };
 
